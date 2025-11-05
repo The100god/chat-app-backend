@@ -40,6 +40,7 @@ const UserSchema = new mongoose.Schema({
         ref: 'User',
       },
     ],
+    isVerified: { type: Boolean, default: false }, // Email verification status
     
 })
 
