@@ -3,6 +3,7 @@ const User = require("../models/User");
 const nodemailer = require("nodemailer");
 const { OAuth2Client } = require("google-auth-library");
 const jwt = require("jsonwebtoken");
+require("dotenv").config();
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -96,7 +97,7 @@ const signup = async (req, res) => {
     const verifyLink = `${process.env.BASE_URL}/api/auth/verify-email/${verifyToken}`;
     // Send verification email
     await transporter.sendMail({
-      from: process.env.EMAIL_USER,
+      from: `"Chugli App" <${process.env.EMAIL_USER}>`,
       to: email,
       subject: "Verify your Chugli account ✉️",
       html: `
