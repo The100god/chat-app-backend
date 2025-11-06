@@ -15,7 +15,10 @@ const createToken = (userId) => {
 
 // ✅ Nodemailer setup (for verification)
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  // service: "gmail",
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS, // must be your app password, not real Gmail password
@@ -87,10 +90,10 @@ const signup = async (req, res) => {
     // });
 
     const verifyToken = jwt.sign(
-   { username, email, password },
-  process.env.JWT_SECRET,
-  { expiresIn: "1d" } // token valid for 1 day
-);
+      { username, email, password },
+      process.env.JWT_SECRET,
+      { expiresIn: "1d" } // token valid for 1 day
+    );
 
     // const token = createToken(user._id);
 
@@ -123,7 +126,6 @@ const signup = async (req, res) => {
   }
 };
 
-
 // 🧩 2️⃣ VERIFY EMAIL ROUTE
 const verifyEmail = async (req, res) => {
   const { token } = req.params;
@@ -138,7 +140,9 @@ const verifyEmail = async (req, res) => {
     // user.isVerified = true;
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      return res.status(400).send("<h2>Email already verified or user exists.</h2>");
+      return res
+        .status(400)
+        .send("<h2>Email already verified or user exists.</h2>");
     }
 
     const user = await User.create({
@@ -193,7 +197,6 @@ const login = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
-
 
 const resendVerification = async (req, res) => {
   const { email } = req.body;
@@ -283,9 +286,11 @@ const changePassword = async (req, res) => {
   }
 };
 
-module.exports = { signup,
+module.exports = {
+  signup,
   login,
   changePassword,
   googleAuth,
   verifyEmail,
-  resendVerification, };
+  resendVerification,
+};
