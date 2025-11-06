@@ -96,7 +96,7 @@ const signup = async (req, res) => {
     const verifyLink = `${process.env.BASE_URL}/api/auth/verify-email/${verifyToken}`;
     // Send verification email
     await transporter.sendMail({
-      from: `${process.env.EMAIL_USER}>`,
+      from: `${process.env.EMAIL_USER}`,
       to: email,
       subject: "Verify your Chugli account ✉️",
       html: `
