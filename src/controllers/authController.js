@@ -78,15 +78,15 @@ const signup = async (req, res) => {
       return res.status(400).json({ message: "user is already exist" });
     }
 
-    const user = await User.create({
-      username,
-      email,
-      password,
-      isVerified: false,
-    });
+    // const user = await User.create({
+    //   username,
+    //   email,
+    //   password,
+    //   isVerified: false,
+    // });
 
     const verifyToken = jwt.sign(
-  { userId: user._id },
+   { username, email, password },
   process.env.JWT_SECRET,
   { expiresIn: "1d" } // token valid for 1 day
 );
@@ -96,7 +96,7 @@ const signup = async (req, res) => {
     const verifyLink = `${process.env.BASE_URL}/api/auth/verify-email/${verifyToken}`;
     // Send verification email
     await transporter.sendMail({
-      from: `"Chugli App" <${process.env.EMAIL_USER}>`,
+      from: `${process.env.EMAIL_USER}>`,
       to: email,
       subject: "Verify your Chugli account ✉️",
       html: `
@@ -115,7 +115,7 @@ const signup = async (req, res) => {
     // jwt.sign({id: user._id}, process.env.JWT_SECRET, {
     //     expiresIn:"30d"
     // })
-    res.status(201).json({ message: "user created", token, userId: user._id });
+    res.status(201).json({ message: "user created", verifyToken });
   } catch (error) {
     console.error("Signup error:", error);
     res.status(500).json({ message: error.message });
@@ -128,13 +128,24 @@ const verifyEmail = async (req, res) => {
   const { token } = req.params;
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.userId);
+    // const user = await User.findById(decoded.userId);
+    const { username, email, password } = decoded;
+    // if (!user) return res.status(404).send("<h2>User not found</h2>");
+    // if (user.isVerified)
+    //   return res.status(400).send("<h2>Email already verified</h2>");
 
-    if (!user) return res.status(404).send("<h2>User not found</h2>");
-    if (user.isVerified)
-      return res.status(400).send("<h2>Email already verified</h2>");
+    // user.isVerified = true;
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).send("<h2>Email already verified or user exists.</h2>");
+    }
 
-    user.isVerified = true;
+    const user = await User.create({
+      username,
+      email,
+      password,
+      isVerified: true,
+    });
     await user.save();
 
     res.status(200).send(`
