@@ -85,7 +85,13 @@ const signup = async (req, res) => {
       isVerified: false,
     });
 
-    const token = createToken(user._id);
+    const verifyToken = jwt.sign(
+  { userId: user._id },
+  process.env.JWT_SECRET,
+  { expiresIn: "1d" } // token valid for 1 day
+);
+
+    // const token = createToken(user._id);
 
     const verifyLink = `${process.env.BASE_URL}/api/auth/verify-email/${verifyToken}`;
     // Send verification email
@@ -111,6 +117,7 @@ const signup = async (req, res) => {
     // })
     res.status(201).json({ message: "user created", token, userId: user._id });
   } catch (error) {
+    console.error("Signup error:", error);
     res.status(500).json({ message: error.message });
   }
 };
