@@ -92,12 +92,17 @@ const signup = async (req, res) => {
     const verifyToken = jwt.sign(
       { username, email, password },
       process.env.JWT_SECRET,
-      { expiresIn: "1d" } // token valid for 1 day
+      { expiresIn: "1h" } // token valid for 1 day
     );
 
     // const token = createToken(user._id);
 
+    // Verification link
     const verifyLink = `${process.env.BASE_URL}/api/auth/verify-email/${verifyToken}`;
+
+    // Verify transporter configuration
+    await transporter.verify();
+
     // Send verification email
     await transporter.sendMail({
       from: `"Chugli App" <${process.env.EMAIL_USER}>`,
@@ -116,12 +121,9 @@ const signup = async (req, res) => {
       `,
     });
 
-    // jwt.sign({id: user._id}, process.env.JWT_SECRET, {
-    //     expiresIn:"30d"
-    // })
-    res.status(201).json({ message: "user created", verifyToken });
+    res.status(201).json({ message: "Please check your email to verify your account."});
   } catch (error) {
-    console.error("Signup error:", error);
+    // console.error("Signup error:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -130,38 +132,56 @@ const signup = async (req, res) => {
 const verifyEmail = async (req, res) => {
   const { token } = req.params;
   try {
+    // Verify the token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    // const user = await User.findById(decoded.userId);
-    const { username, email, password } = decoded;
-    // if (!user) return res.status(404).send("<h2>User not found</h2>");
-    // if (user.isVerified)
-    //   return res.status(400).send("<h2>Email already verified</h2>");
 
-    // user.isVerified = true;
+    // Extract username, email, and password from the decoded token
+    const { username, email, password } = decoded;
+
+    // Check if user already exists
     const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res
-        .status(400)
-        .send("<h2>Email already verified or user exists.</h2>");
+
+    // If user exists and is verified, redirect to frontend with info
+    if (existingUser && existingUser.isVerified) {
+      console.log("⚠️ User already verified:", email);
+      // Redirect to frontend with info
+      return res.redirect(
+        `${process.env.CLIENT_URL}/pages/login?verified=already`
+      );
     }
 
-    const user = await User.create({
-      username,
-      email,
-      password,
-      isVerified: true,
-    });
-    await user.save();
+    // If user doesn’t exist → create verified user
+    if (!existingUser) {
+      existingUser = await User.create({
+        username,
+        email,
+        password,
+        isVerified: true,
+      });
+      console.log("✅ Created verified user:", email);
+    } else {
+      // Update existing record to verified
+      existingUser.isVerified = true;
+      await existingUser.save();
+      console.log("✅ Marked existing user as verified:", email);
+    }
 
-    res.status(200).send(`
-      <div style="font-family:sans-serif;text-align:center;margin-top:50px;">
-        <h2>✅ Email verified successfully!</h2>
-        <p>You can now close this tab and log in to your Chugli account.</p>
-      </div>
-    `);
+    // Create JWT token for login
+    const appToken = createToken(existingUser._id);
+
+    // Redirect user to frontend with token (auto-login)
+    const redirectURL = `${process.env.CLIENT_URL}/?token=${appToken}`;
+
+    console.log("🔗 Redirecting user to:", redirectURL);
+    return res.status(302).redirect(redirectURL);
+
   } catch (error) {
-    console.error("Email Verification Error:", error);
-    res.status(400).send("<h2>❌ Invalid or expired verification link.</h2>");
+    // console.error("Email Verification Error:", error);
+    if (!res.headersSent) {
+      res.status(302).redirect(
+        `${process.env.CLIENT_URL}/pages/login?verified=failed`
+      );
+    }
   }
 };
 
@@ -169,23 +189,26 @@ const login = async (req, res) => {
   const { email, password } = req.body;
 
   try {
+    // Check if user exists
     const user = await User.findOne({ email });
     if (!user) {
       return res.status(400).json({ message: "Invalid User Details" });
     }
 
-    // 🧩 ADD THIS CHECK HERE — before password match
+    // ADD THIS CHECK HERE — before password match
     if (!user.isVerified) {
       return res.status(403).json({
         message: "Please verify your email before logging in.",
       });
     }
 
+    // Check if password matches
     const matches = await user.matchPassword(password);
     if (!matches) {
       return res.status(400).json({ message: "Invalid User Details" });
     }
 
+    // Create JWT token
     const token = createToken(user._id);
     //  jwt.sign({id: user._id}, process.env.JWT_SECRET, {
     //     expiresIn:"30d"
@@ -201,16 +224,24 @@ const login = async (req, res) => {
 const resendVerification = async (req, res) => {
   const { email } = req.body;
   try {
+    // Find user by email
     const user = await User.findOne({ email });
     if (!user) return res.status(404).json({ message: "User not found" });
+    // Check if already verified
     if (user.isVerified)
       return res.status(400).json({ message: "Email already verified" });
 
+    // Create new verification token
     const verifyToken = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, {
-      expiresIn: "1d",
+      expiresIn: "1h",
     });
+    // Verification link
     const verifyLink = `${process.env.BASE_URL}/api/auth/verify-email/${verifyToken}`;
 
+    // Verify transporter configuration
+    await transporter.verify();
+
+    // Send verification email
     await transporter.sendMail({
       from: `"Chugli App" <${process.env.EMAIL_USER}>`,
       to: email,
@@ -224,6 +255,7 @@ const resendVerification = async (req, res) => {
       `,
     });
 
+    // Return success message
     res
       .status(200)
       .json({ message: "Verification email resent successfully!" });
@@ -234,15 +266,18 @@ const resendVerification = async (req, res) => {
 
 const changePassword = async (req, res) => {
   try {
+    // get user id from auth middleware
     const userId = req.user._id;
     const { oldPassword, newPassword, confirmPassword } = req.body;
 
+    // validate input
     if (!oldPassword || !newPassword || !confirmPassword) {
       return res
         .status(400)
         .json({ message: "Please provide all required fields" });
     }
 
+    // check if new password and confirm password match
     if (newPassword !== confirmPassword) {
       return res
         .status(400)
@@ -259,9 +294,11 @@ const changePassword = async (req, res) => {
       });
     }
 
+    // fetch user from DB
     const user = await User.findById(userId).select("+password");
     if (!user) return res.status(404).json({ message: "User not found" });
 
+    // check if old password matches
     const isMatch = await user.matchPassword(oldPassword);
     if (!isMatch) {
       return res.status(401).json({ message: "Old password is incorrect" });
