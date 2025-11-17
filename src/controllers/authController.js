@@ -46,16 +46,32 @@ const googleAuth = async (req, res) => {
     // 3️⃣ Check if the user already exists
     let user = await User.findOne({ email });
 
-    if (!user) {
-      // 4️⃣ Create new user if not exist
+    if (user) {
+      if (!user.isVerified) {
+        user.isVerified = true;
+      }
+
+      // If old user does not have self-friend, fix it
+      if (!user.friends.includes(user._id)) {
+        user.friends.push(user._id);
+      }
+
+      await user.save();
+    } else {
+      // Create new user only if none exists
       user = await User.create({
         username: name,
         email,
-        password: "GOOGLE_AUTH_USER", // dummy password
+        password: "GOOGLE_AUTH_USER",
         profilePic: picture,
         isVerified: true,
       });
+
+      // MAKE USER FRIEND OF HIMSELF
+      user.friends = [user._id];
+      await user.save();
     }
+
 
     // 5️⃣ Generate JWT for our app
     const appToken = createToken(user._id);
@@ -158,10 +174,19 @@ const verifyEmail = async (req, res) => {
         password,
         isVerified: true,
       });
+
+      // MAKE USER FRIEND OF HIMSELF
+      existingUser.friends = [existingUser._id];
+      await existingUser.save();
+
       console.log("✅ Created verified user:", email);
     } else {
       // Update existing record to verified
       existingUser.isVerified = true;
+      // FIX MISSING SELF-FRIEND
+      if (!existingUser.friends.includes(existingUser._id)) {
+        existingUser.friends.push(existingUser._id);
+      }
       await existingUser.save();
       console.log("✅ Marked existing user as verified:", email);
     }
@@ -206,6 +231,12 @@ const login = async (req, res) => {
     const matches = await user.matchPassword(password);
     if (!matches) {
       return res.status(400).json({ message: "Invalid User Details" });
+    }
+
+    // FIX MISSING SELF-FRIEND
+    if (!user.friends.includes(user._id)) {
+      user.friends.push(user._id);
+      await user.save();
     }
 
     // Create JWT token

@@ -221,7 +221,7 @@ const getFriends = async (req, res) => {
       })
     );
 
-    res.status(200).json(friendDetails);
+    res.status(200).json(friendDetails || []);
   } catch (error) {
     console.error("Error in getFriends:", error);
     res.status(500).json({ error: error.message });
