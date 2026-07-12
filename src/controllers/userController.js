@@ -1,4 +1,4 @@
-// controllers/userController.js
+const mongoose = require("mongoose");
 const User = require("../models/User");
 const cloudinary = require("../utils/cloudinary");
 
@@ -6,8 +6,14 @@ const cloudinary = require("../utils/cloudinary");
 const searchUsersByUsername = async (req, res) => {
   const { username, userId } = req.query;
 
-  if (!username || !userId){
-    return res.status(400).json({message:"Missing search term or user ID"})
+  if (
+    !username ||
+    !userId ||
+    userId === "null" ||
+    userId === "undefined" ||
+    !mongoose.Types.ObjectId.isValid(userId)
+  ) {
+    return res.status(400).json({ message: "Missing or invalid search term or user ID" });
   }
   try {
     const currentUser = await User.findById(userId).populate("friends", "_id");

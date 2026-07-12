@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Message = require("../models/Message");
 const User = require("../models/User");
 
@@ -40,6 +41,9 @@ const getFriendRequests = async (req, res) => {
   const { userId } = req.params;
 
   try {
+    if (!userId || userId === "null" || userId === "undefined" || !mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ error: "Invalid or missing User ID" });
+    }
     
     const user = await User.findById(userId).populate(
       "friendRequests",
@@ -179,8 +183,8 @@ const getFriends = async (req, res) => {
   const { userId } = req.params; // Get userId from URL params
 
   try {
-    if (!userId) {
-      return res.status(400).json({ error: "User ID is required" });
+    if (!userId || userId === "null" || userId === "undefined" || !mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ error: "Invalid or missing User ID" });
     }
 
     // Find user and populate friends
