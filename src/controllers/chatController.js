@@ -5,11 +5,26 @@ exports.createChat = async (req, res) => {
   const [userId, recipientId] = req.body;
 console.log(req.body)
   try {
-    const chat = await Chat.findOne({
-      members: {
-        $all: [userId, recipientId],
-      },
-    });
+    let chat;
+    if (userId === recipientId) {
+      // For self-chat, look for a chat of size 2 where both elements are userId
+      chat = await Chat.findOne({
+        members: { $size: 2 },
+        $and: [
+          { "members.0": userId },
+          { "members.1": userId }
+        ]
+      });
+    } else {
+      // For standard 1-1 chat, look for a chat of size 2 containing both user IDs
+      chat = await Chat.findOne({
+        members: {
+          $size: 2,
+          $all: [userId, recipientId],
+        },
+      });
+    }
+
     if (chat) {
       return res.status(200).json(chat);
     }

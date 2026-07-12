@@ -64,6 +64,11 @@ const initializeSocket = (io) => {
               sender: friend._id,
               receiver: userId,
               isRead: false,
+              $or: [
+                { expiresAt: null },
+                { expiresAt: { $exists: false } },
+                { expiresAt: { $gt: new Date() } },
+              ],
             });
             return {
               friendId: friend._id,
@@ -117,6 +122,11 @@ const initializeSocket = (io) => {
                   sender: friend._id,
                   receiver: receiverId,
                   isRead: false,
+                  $or: [
+                    { expiresAt: null },
+                    { expiresAt: { $exists: false } },
+                    { expiresAt: { $gt: new Date() } },
+                  ],
                 });
                 return {
                   friendId: friend._id,
@@ -143,19 +153,41 @@ const initializeSocket = (io) => {
     });
 
     socket.on("messagesRead", async ({ chatId, readerId, senderId }) => {
-      await Message.updateMany(
-        {
-          chat: chatId,
-          sender: senderId,
-          receiver: readerId,
-          isRead: false,
-        },
-        { $set: { isRead: true } }
-      );
+      // Step 1: Find unread messages that have a disappearDuration set
+      const unreadMessages = await Message.find({
+        chatId: chatId,
+        sender: senderId,
+        receiver: readerId,
+        isRead: false,
+      });
+
+      // Step 2: Mark all as read, and set expiresAt for messages with a disappearDuration
+      const now = new Date();
+      const bulkOps = unreadMessages.map((msg) => {
+        const update = { isRead: true };
+        if (msg.disappearDuration && msg.disappearDuration > 0) {
+          update.expiresAt = new Date(now.getTime() + msg.disappearDuration * 3600000);
+        }
+        return {
+          updateOne: {
+            filter: { _id: msg._id },
+            update: { $set: update },
+          },
+        };
+      });
+
+      if (bulkOps.length > 0) {
+        await Message.bulkWrite(bulkOps);
+      }
+
+      // Step 3: Fetch updated messages to emit with expiresAt included
+      const updatedMessages = await Message.find({ chatId })
+        .populate("sender", "_id username profilePic");
 
       io.to(chatId).emit("messagesReadAck", {
         chatId,
         readerId,
+        updatedMessages,
       });
 
       const readerSocket = users.get(readerId);
@@ -172,26 +204,20 @@ const initializeSocket = (io) => {
       async ({ chatId, senderId, content, receiverId }) => {
         console.log("rid", receiverId);
         try {
-          const newMessage = new Message({
-            chatId,
-            sender: senderId,
-            receiver: receiverId,
-            content,
-            isRead: false,
-          });
-
           // Update unread count for receiver in real-time
+          // Exclude expired messages from unread count
           const unreadCount = await Message.countDocuments({
             sender: senderId,
             receiver: receiverId,
             isRead: false,
+            $or: [
+              { expiresAt: null },
+              { expiresAt: { $exists: false } },
+              { expiresAt: { $gt: new Date() } },
+            ],
           });
-          // console.log("unreadCount", unreadCount);
-          // console.log("users", users);
-          // console.log("receiverId", receiverId);
 
           const receiverSocket = users.get(receiverId);
-          // console.log("receiverSocket", receiverSocket);
           if (receiverSocket) {
             io.to(receiverSocket).emit("unreadMessageCountUpdated", {
               friendId: senderId,
@@ -204,12 +230,32 @@ const initializeSocket = (io) => {
       }
     );
 
-    // read unseen message
+    // read unseen message — also set expiresAt for disappearing messages
     socket.on("mark_messages_read", async ({ senderId, receiverId }) => {
-      await Message.updateMany(
-        { sender: senderId, receiver: receiverId, isRead: false },
-        { $set: { isRead: true } }
-      );
+      // Find unread messages to check for disappearDuration
+      const unreadMessages = await Message.find({
+        sender: senderId,
+        receiver: receiverId,
+        isRead: false,
+      });
+
+      const now = new Date();
+      const bulkOps = unreadMessages.map((msg) => {
+        const update = { isRead: true };
+        if (msg.disappearDuration && msg.disappearDuration > 0) {
+          update.expiresAt = new Date(now.getTime() + msg.disappearDuration * 3600000);
+        }
+        return {
+          updateOne: {
+            filter: { _id: msg._id },
+            update: { $set: update },
+          },
+        };
+      });
+
+      if (bulkOps.length > 0) {
+        await Message.bulkWrite(bulkOps);
+      }
 
       // Send updated unread count to receiver
       const receiverSocketId = users.get(receiverId);
@@ -244,8 +290,32 @@ const initializeSocket = (io) => {
             profilePic: sender.profilePic,
           });
         }
+
+        // Confirm to sender that request was sent
+        const senderSocketId = users.get(senderId);
+        if (senderSocketId) {
+          io.to(senderSocketId).emit("friendRequestSent", {
+            receiverId,
+          });
+        }
       } catch (error) {
         console.error("Error sending friend request:", error);
+      }
+    });
+
+    // Get list of user IDs that the current user has sent friend requests to
+    socket.on("getSentFriendRequests", async ({ userId }) => {
+      try {
+        // Find all users who have this userId in their friendRequests array
+        const usersWithPendingRequests = await User.find(
+          { friendRequests: userId },
+          { _id: 1 }
+        );
+        const sentIds = usersWithPendingRequests.map((u) => u._id.toString());
+        socket.emit("sentFriendRequestsList", sentIds);
+      } catch (error) {
+        console.error("❌ Error in getSentFriendRequests:", error.message);
+        socket.emit("sentFriendRequestsList", []);
       }
     });
 
@@ -268,6 +338,47 @@ const initializeSocket = (io) => {
       } catch (error) {
         console.error("❌ Error in getFriendRequests:", error.message);
         socket.emit("friendRequestsList", []);
+      }
+    });
+
+    // Get detailed sent friend requests (with username + profilePic)
+    socket.on("getSentFriendRequestsDetailed", async ({ userId }) => {
+      try {
+        const usersWithPendingRequests = await User.find(
+          { friendRequests: userId },
+          { _id: 1, username: 1, profilePic: 1 }
+        );
+        socket.emit("sentFriendRequestsDetailedList", usersWithPendingRequests);
+      } catch (error) {
+        console.error("❌ Error in getSentFriendRequestsDetailed:", error.message);
+        socket.emit("sentFriendRequestsDetailedList", []);
+      }
+    });
+
+    // Cancel a sent friend request
+    socket.on("cancelFriendRequest", async ({ senderId, receiverId }) => {
+      try {
+        const receiver = await User.findById(receiverId);
+        if (!receiver) return;
+
+        receiver.friendRequests = receiver.friendRequests.filter(
+          (id) => id.toString() !== senderId
+        );
+        await receiver.save();
+
+        // Notify sender
+        const senderSocketId = users.get(senderId);
+        if (senderSocketId) {
+          io.to(senderSocketId).emit("friendRequestCancelled", { receiverId });
+        }
+
+        // Notify receiver to remove from their incoming list
+        const receiverSocketId = users.get(receiverId);
+        if (receiverSocketId) {
+          io.to(receiverSocketId).emit("friendRequestRemoved", { senderId });
+        }
+      } catch (error) {
+        console.error("❌ Error cancelling friend request:", error.message);
       }
     });
 

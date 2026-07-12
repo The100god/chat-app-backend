@@ -1,7 +1,7 @@
 // routes/userRoute.js
 const express = require("express");
 const router = express.Router();
-const { searchUsersByUsername, getUserProfile, updateUserProfile  } = require("../controllers/userController");
+const { searchUsersByUsername, getUserProfile, updateUserProfile, deleteAccount  } = require("../controllers/userController");
 const { protect, changePasswordLimiter } = require("../middleware/authMiddleware");
 const { changePassword } = require("../controllers/authController");
 
@@ -14,4 +14,8 @@ router.put("/updateProfile", protect, updateUserProfile);
 
 // Change password route can be added here
 router.put("/changePassword", protect, changePasswordLimiter, changePassword)
+
+// Delete account
+router.delete("/deleteAccount", protect, deleteAccount);
+
 module.exports = router;

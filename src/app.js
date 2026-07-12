@@ -12,15 +12,25 @@ const messageRoutes = require("./routes/messageRoutes");
 const userRoutes = require("./routes/userRoute");
 const groupRoutes = require("./routes/groupRoutes");
 const { initializeSocket } = require("./utils/socketManager");
+const cookieParser = require("cookie-parser");
 
 dotenv.config();
 const app = express();
+
+app.use(cookieParser());
 
 
 // middleware
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
+app.use(
+  cors({
+    origin: process.env.CLIENT_URL,
+    credentials: true, // 🔴 REQUIRED
+  })
+);
+
 // app.use(cors(
 //   {
 //   origin: process.env.CLIENT_URL,

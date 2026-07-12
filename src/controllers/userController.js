@@ -76,4 +76,53 @@ const updateUserProfile = async (req, res) => {
   }
 };
 
-module.exports = { searchUsersByUsername, getUserProfile, updateUserProfile };
+// ❌ Delete user account and all related data
+const deleteAccount = async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    // Remove user from all friends' friend lists
+    await User.updateMany(
+      { friends: userId },
+      { $pull: { friends: userId } }
+    );
+
+    // Remove user from all friend request lists
+    await User.updateMany(
+      { friendRequests: userId },
+      { $pull: { friendRequests: userId } }
+    );
+
+    // Delete all friendships involving this user
+    const Friendship = require("../models/Friendship");
+    await Friendship.deleteMany({
+      $or: [{ user1: userId }, { user2: userId }],
+    });
+
+    // Delete all messages sent or received by this user
+    const Message = require("../models/Message");
+    await Message.deleteMany({
+      $or: [{ senderId: userId }, { receiverId: userId }],
+    });
+
+    // Remove user from groups
+    const Group = require("../models/Group");
+    await Group.updateMany(
+      { members: userId },
+      { $pull: { members: userId } }
+    );
+
+    // Delete groups created by this user (optional — keeps groups alive if others are in them)
+    await Group.deleteMany({ createdBy: userId, members: { $size: 0 } });
+
+    // Delete the user
+    await User.findByIdAndDelete(userId);
+
+    res.status(200).json({ message: "Account deleted successfully" });
+  } catch (error) {
+    console.error("Delete account error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+module.exports = { searchUsersByUsername, getUserProfile, updateUserProfile, deleteAccount };
