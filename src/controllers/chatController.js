@@ -3,7 +3,7 @@ const Message = require("../models/Message");
 
 exports.createChat = async (req, res) => {
   const [userId, recipientId] = req.body;
-console.log(req.body)
+// console.log(req.body)
   try {
     let chat;
     if (userId === recipientId) {
@@ -43,7 +43,7 @@ exports.getUserChats = async (req, res) => {
     const chat = await Chat.find({
       members: { $in: [req.params.userId] },
     }).populate("members", "-password");
-    console.log("chat", chat)
+    // console.log("chat", chat)
     return res.status(200).json(chat);
   } catch (error) {
     return res.status(500).json(error);

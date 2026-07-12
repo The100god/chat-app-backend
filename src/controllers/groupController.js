@@ -79,10 +79,10 @@ const GetAllGroups = async (req, res) => {
 // send message
 
 const SendGroupMessageToDb = async (req, res) => {
-  console.log("reqbody", req.body);
+  // console.log("reqbody", req.body);
   const { groupId, senderId, content, media = [] } = req.body;
   try {
-    console.log("groupIdbysendgroupMessage", groupId);
+    // console.log("groupIdbysendgroupMessage", groupId);
     let mediaUrls = [];
 
     for (const base64Data of media) {
@@ -102,14 +102,14 @@ const SendGroupMessageToDb = async (req, res) => {
     });
 
     const saveMessage = await newMessage.save();
-    console.log("groupsaveMessage", saveMessage);
+    // console.log("groupsaveMessage", saveMessage);
     // const populateMessage = await saveMessage
     //   .populate("sender", "_id groupProfilePic groupName")
     //   .populate("senderId", "_id username profilePic")
     const populateMessage = await GroupMessage.findById(saveMessage._id)
       .populate("sender", "_id username profilePic")
       .populate("seenBy", "_id username profilePic");
-    console.log("grouppopMessage", populateMessage);
+    // console.log("grouppopMessage", populateMessage);
 
     req.io.to(groupId).emit("newGroupMessage", populateMessage);
 
@@ -127,7 +127,7 @@ const GetGroupMessages = async (req, res) => {
     const message = await GroupMessage.find({
       groupId: req.params.groupId,
     }).populate("sender", "_id groupProfilePic groupName");
-    console.log("group message", message);
+    // console.log("group message", message);
     return res.status(200).json(message);
   } catch (error) {
     return res.status(500).json({

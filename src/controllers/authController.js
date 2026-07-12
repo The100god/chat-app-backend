@@ -165,16 +165,16 @@ const signup = async (req, res) => {
     );
 
     const verifyLink = `${process.env.BASE_URL}/api/auth/verify-email/${verifyToken}`;
-    console.log("verifyLink", verifyLink);
+    // console.log("verifyLink", verifyLink);
 
-    console.log("✅ EMAIL_USER:", process.env.EMAIL_USER);
-    console.log(
-      "✅ EMAIL_PASS:",
-      process.env.EMAIL_PASS ? "exists" : "missing"
-    );
-    console.log("✅ BASE_URL:", process.env.BASE_URL);
+    // console.log("✅ EMAIL_USER:", process.env.EMAIL_USER);
+    // console.log(
+    //   "✅ EMAIL_PASS:",
+    //   process.env.EMAIL_PASS ? "exists" : "missing"
+    // );
+    // console.log("✅ BASE_URL:", process.env.BASE_URL);
     await transporter.verify();
-    console.log("✅ Transporter is ready!");
+    console.log("Transporter is ready!");
     // Send verification email
     await transporter.sendMail({
       from: `"Chugli App" <${process.env.EMAIL_USER}>`,
@@ -208,20 +208,20 @@ const signup = async (req, res) => {
 // 🧩 2️⃣ VERIFY EMAIL ROUTE
 const verifyEmail = async (req, res) => {
   console.log("Verifying email...");
-  console.log("Request params:", req.params);
+  // console.log("Request params:", req.params);
   const { token } = req.params;
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     // const user = await User.findById(decoded.userId);
     const { username, email, password } = decoded;
 
-    console.log("Decoded Token:", decoded);
+    // console.log("Decoded Token:", decoded);
     // console.log("User by id:", user);
 
     let existingUser = await User.findOne({ email });
 
     if (existingUser && existingUser.isVerified) {
-      console.log("⚠️ User already verified:", email);
+      // console.log("⚠️ User already verified:", email);
       // Redirect to frontend with info
       return res.redirect(
         `${process.env.CLIENT_URL}/pages/login?verified=already`
@@ -255,7 +255,7 @@ const verifyEmail = async (req, res) => {
       existingUser.friends = [existingUser._id];
       await existingUser.save();
 
-      console.log("✅ Created verified user:", email);
+      // console.log("✅ Created verified user:", email);
     } else {
       // Update existing record to verified
       existingUser.isVerified = true;
@@ -265,7 +265,7 @@ const verifyEmail = async (req, res) => {
       }
 
       await existingUser.save();
-      console.log("✅ Marked existing user as verified:", email);
+      // console.log("✅ Marked existing user as verified:", email);
     }
 
     // 4️⃣ Create JWT token for login
@@ -281,7 +281,7 @@ const verifyEmail = async (req, res) => {
     // 5️⃣ Redirect user to frontend with token (auto-login)
     const redirectURL = `${process.env.CLIENT_URL}/?token=${appToken}`;
 
-    console.log("🔗 Redirecting user to:", redirectURL);
+    // console.log("🔗 Redirecting user to:", redirectURL);
     return res.status(302).redirect(redirectURL);
 
     // if (!user) return res.status(404).send("<h2>User not found</h2>");
@@ -439,7 +439,7 @@ const changePassword = async (req, res) => {
     const token = createToken(user._id);
     res.status(200).json({ message: "password changed successfully", token });
   } catch (error) {
-    console.log("change password error", error);
+    // console.log("change password error", error);
     res.status(500).json({ message: "Server Error" });
   }
 };

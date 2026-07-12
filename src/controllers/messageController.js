@@ -48,7 +48,7 @@ exports.sendMessages = async (req, res) => {
 
     // Send the message to the receiver in real-time using Socket.io
     req.io.to(chatId.toString()).emit("newMessage", fullMessage);
-    console.log("fullMessage", fullMessage);
+    // console.log("fullMessage", fullMessage);
     return res.status(200).json(fullMessage);
   } catch (error) {
     return res.status(500).json(error);

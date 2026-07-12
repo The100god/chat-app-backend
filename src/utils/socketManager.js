@@ -14,14 +14,14 @@ const groups = new Map(); // groupId -> { members, admins, chatName }
 
 const initializeSocket = (io) => {
   io.on("connection", (socket) => {
-    console.log("🟢 New user connected:", socket.id);
+    // console.log("🟢 New user connected:", socket.id);
 
     socket.on("join", (userId) => {
       socket.join(userId);
       // console.log("userId", userId);
       // console.log("Id", socket.id);
       users.set(userId, socket.id);
-      console.log(`✅ User ${userId} joined with socket ID: ${socket.id}`);
+      // console.log(`✅ User ${userId} joined with socket ID: ${socket.id}`);
     });
 
     // socket.on("markMessagesAsRead", async ({ chatId, userId, friendId }) => {
@@ -103,10 +103,10 @@ const initializeSocket = (io) => {
           if (senderSocket) {
             if (status === "accepted") {
               io.to(senderSocket).emit("friendRequestAccepted", { receiverId });
-              console.log(`🤝 Friend request accepted by ${receiverId}`);
+              // console.log(`🤝 Friend request accepted by ${receiverId}`);
             } else {
               io.to(senderSocket).emit("friendRequestDenied", { receiverId });
-              console.log(`🚫 Friend request denied by ${receiverId}`);
+              console.error(`🚫 Friend request denied by ${receiverId}`);
             }
           }
 
@@ -202,7 +202,7 @@ const initializeSocket = (io) => {
     socket.on(
       "sendMessage",
       async ({ chatId, senderId, content, receiverId }) => {
-        console.log("rid", receiverId);
+        // console.log("rid", receiverId);
         try {
           // Update unread count for receiver in real-time
           // Exclude expired messages from unread count
@@ -386,7 +386,7 @@ const initializeSocket = (io) => {
 
     socket.on("joinGroup", (groupId) => {
       socket.join(groupId);
-      console.log(`Joined group ${groupId}`);
+      // console.log(`Joined group ${groupId}`);
     });
 
     //create a new group
@@ -408,8 +408,8 @@ const initializeSocket = (io) => {
         //   admins: adminId,
         //   superAdmin,
         // });
-        console.log("groups", groups);
-        console.log(`👥 Group ${groupName} created by ${adminId}`);
+        // console.log("groups", groups);
+        // console.log(`👥 Group ${groupName} created by ${adminId}`);
       }
     );
 
@@ -444,7 +444,10 @@ const initializeSocket = (io) => {
         if (!group || !group.members.has(senderId)) {
           const dbGroup = await Group.findById(groupId);
           if (!dbGroup || !dbGroup.groupMember.map(String).includes(senderId)) {
-            return console.log(`❌ Sender not part of group ${groupId}`);
+            // return console.log(`❌ Sender not part of group ${groupId}`);
+            return socket.emit("error", {
+              message: `Sender not part of group ${groupId}`,
+            });
           }
 
           // Sync memory state
@@ -457,7 +460,7 @@ const initializeSocket = (io) => {
 
           group = groups.get(groupId); // reassign
         }
-        console.log("groupId", groupId);
+        // console.log("groupId", groupId);
 
         // const saveMessage = await SendGroupMessageToDb({
         //   groupId:groupId,
@@ -489,7 +492,7 @@ const initializeSocket = (io) => {
     .populate("sender", "_id username profilePic")
     .populate("seenBy", "_id username profilePic");
 
-    console.log("updatedMessages", updatedMessages)
+    // console.log("updatedMessages", updatedMessages)
     io.to(groupId).emit("groupSeenUpdate", {
       groupId, messages: updatedMessages 
     })
@@ -500,9 +503,9 @@ const initializeSocket = (io) => {
       if (group && group.admins.has(adminId)) {
         group.members.add(newMemberId);
 
-        console.log(`✅ Member ${newMemberId} added to group ${groupId}`);
+        // console.log(`✅ Member ${newMemberId} added to group ${groupId}`);
       } else {
-        console.log(`❌ Unauthorized action by ${adminId}`);
+        console.error(`❌ Unauthorized action by ${adminId}`);
       }
     });
 
@@ -510,9 +513,9 @@ const initializeSocket = (io) => {
       const group = groups.get(groupId);
       if (group && group.superAdmin === adminId) {
         group.members.delete(memberId);
-        console.log(`🚪 Member ${memberId} removed from group ${groupId}`);
+        // console.log(`🚪 Member ${memberId} removed from group ${groupId}`);
       } else {
-        console.log(`❌ Unauthorized action by ${adminId}`);
+        console.error(`❌ Unauthorized action by ${adminId}`);
       }
     });
 
@@ -520,16 +523,16 @@ const initializeSocket = (io) => {
       const group = groups.get(groupId);
       if (group && group.superAdmin === adminId) {
         group.admins.add(newAdminId);
-        console.log(`👑 Admin privileges granted to ${newAdminId}`);
+        // console.log(`👑 Admin privileges granted to ${newAdminId}`);
       } else {
-        console.log(`❌ Unauthorized action by ${adminId}`);
+        console.error(`❌ Unauthorized action by ${adminId}`);
       }
     });
 
     socket.on("disconnect", () => {
       for (let [key, value] of users.entries()) {
         if (value === socket.id) {
-          console.log(`❌ User ${key} disconnected.`);
+          // console.log(`❌ User ${key} disconnected.`);
           users.delete(key);
           break;
         }
