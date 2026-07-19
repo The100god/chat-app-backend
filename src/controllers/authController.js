@@ -143,10 +143,16 @@ const signup = async (req, res) => {
   const { username, email, password } = req.body;
 
   try {
-    const userExists = await User.findOne({ email });
+    const emailExists = await User.findOne({ email });
+    if (emailExists) {
+      return res.status(400).json({ message: "Email is already registered" });
+    }
 
-    if (userExists) {
-      return res.status(400).json({ message: "user is already exist" });
+    const usernameExists = await User.findOne({
+      username: { $regex: new RegExp(`^${username.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')}$`, "i") },
+    });
+    if (usernameExists) {
+      return res.status(400).json({ message: "Username is already taken" });
     }
 
     // const user = await User.create({
@@ -311,10 +317,12 @@ const verifyEmail = async (req, res) => {
 
 // ✅ LOGIN ROUTE
 const login = async (req, res) => {
-  const { email, password } = req.body;
+  const { username, password } = req.body;
 
   try {
-    const user = await User.findOne({ email });
+    const user = await User.findOne({
+      username: { $regex: new RegExp(`^${username.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')}$`, "i") },
+    });
     if (!user) {
       return res.status(400).json({ message: "Invalid User Details" });
     }
