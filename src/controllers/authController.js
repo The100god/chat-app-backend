@@ -179,10 +179,8 @@ const signup = async (req, res) => {
     //   process.env.EMAIL_PASS ? "exists" : "missing"
     // );
     // console.log("✅ BASE_URL:", process.env.BASE_URL);
-    await transporter.verify();
-    console.log("Transporter is ready!");
-    // Send verification email
-    await transporter.sendMail({
+    // Send verification email asynchronously in the background so it doesn't block signup response
+    transporter.sendMail({
       from: `"Chugli App" <${process.env.EMAIL_USER}>`,
       to: email,
       subject: "Verify your Chugli account ✉️",
@@ -197,14 +195,12 @@ const signup = async (req, res) => {
           <p style="margin-top:10px;">This link expires in 24 hours.</p>
         </div>
       `,
+    }).catch((err) => {
+      console.error("Nodemailer signup verification email error:", err);
     });
-    // jwt.sign({id: user._id}, process.env.JWT_SECRET, {
-    //     expiresIn:"30d"
-    // })
+
     res.status(201).json({
       message: "User created! Please check your email to verify your account.",
-      // token: verifyToken,
-      // userId: user._id,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -377,7 +373,8 @@ const resendVerification = async (req, res) => {
     });
     const verifyLink = `${process.env.BASE_URL}/api/auth/verify-email/${verifyToken}`;
 
-    await transporter.sendMail({
+    // Send verification email asynchronously in the background so it doesn't block response
+    transporter.sendMail({
       from: `"Chugli App" <${process.env.EMAIL_USER}>`,
       to: email,
       subject: "Verify your Chugli account (Resent)",
@@ -388,6 +385,8 @@ const resendVerification = async (req, res) => {
           Verify My Email
         </a>
       `,
+    }).catch((err) => {
+      console.error("Nodemailer resend verification email error:", err);
     });
 
     res
