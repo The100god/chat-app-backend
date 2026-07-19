@@ -22,7 +22,7 @@ const UserSchema = new mongoose.Schema({
     },
     about:{
         type:String,
-        default:"Hey there! I am using ChatApp 💬", // Optional about section
+        default:"Hey there! I am using Chugli 💬", // Optional about section
     },
     profilePic: {
         type: String,

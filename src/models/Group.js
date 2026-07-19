@@ -27,6 +27,10 @@ const GroupSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
   },
+  description: {
+    type: String,
+    default: "Hey there! We are using Chugli 💬",
+  },
 });
 
 module.exports = mongoose.model("Group", GroupSchema)
