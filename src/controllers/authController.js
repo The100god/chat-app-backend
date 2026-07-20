@@ -1,7 +1,7 @@
 // const { model } = require("mongoose");
 const { OAuth2Client } = require("google-auth-library");
 const User = require("../models/User");
-const nodemailer = require("nodemailer");
+const { sendEmail } = require("../utils/email");
 const jwt = require("jsonwebtoken");
 require("dotenv").config();
 
@@ -45,18 +45,6 @@ const refreshTokenHandler = async (req, res) => {
     });
   }
 };
-
-// ✅ Nodemailer setup (for verification)
-const transporter = nodemailer.createTransport({
-  // service: "gmail",
-  host: "smtp.gmail.com",
-  port: 465,
-  secure: true,
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS, // must be your app password, not real Gmail password
-  },
-});
 
 const googleAuth = async (req, res) => {
   try {
@@ -143,6 +131,12 @@ const signup = async (req, res) => {
   const { username, email, password } = req.body;
 
   try {
+    // 1️⃣ Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!email || !emailRegex.test(email)) {
+      return res.status(400).json({ message: "Please enter a valid email address" });
+    }
+
     const emailExists = await User.findOne({ email });
     if (emailExists) {
       return res.status(400).json({ message: "Email is already registered" });
@@ -155,33 +149,28 @@ const signup = async (req, res) => {
       return res.status(400).json({ message: "Username is already taken" });
     }
 
-    // const user = await User.create({
-    //   username,
-    //   email,
-    //   password,
-    //   isVerified: false,
-    // });
+    // 2️⃣ Create verified user directly
+    const user = await User.create({
+      username,
+      email,
+      password,
+      isVerified: true,
+    });
 
-    // const token = createToken(user._id);
+    // MAKE USER FRIEND OF HIMSELF
+    user.friends = [user._id];
+    await user.save();
 
+    /*
+    // 📧 EMAIL VERIFICATION (COMMENTED OUT FOR DIRECT ENTRY BY SIGNUP)
     const verifyToken = jwt.sign(
       { username, email, password },
       process.env.JWT_SECRET,
-      { expiresIn: "1h" } // token valid for 1 day
+      { expiresIn: "1h" }
     );
 
     const verifyLink = `${process.env.BASE_URL}/api/auth/verify-email/${verifyToken}`;
-    // console.log("verifyLink", verifyLink);
-
-    // console.log("✅ EMAIL_USER:", process.env.EMAIL_USER);
-    // console.log(
-    //   "✅ EMAIL_PASS:",
-    //   process.env.EMAIL_PASS ? "exists" : "missing"
-    // );
-    // console.log("✅ BASE_URL:", process.env.BASE_URL);
-    // Send verification email asynchronously in the background so it doesn't block signup response
-    transporter.sendMail({
-      from: `"Chugli App" <${process.env.EMAIL_USER}>`,
+    sendEmail({
       to: email,
       subject: "Verify your Chugli account ✉️",
       html: `
@@ -196,11 +185,25 @@ const signup = async (req, res) => {
         </div>
       `,
     }).catch((err) => {
-      console.error("Nodemailer signup verification email error:", err);
+      console.error("Signup verification email error:", err);
+    });
+    */
+
+    // 3️⃣ Generate JWT for direct app entry
+    const token = createToken(user._id);
+    const refreshToken = generateRefreshToken(user._id);
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: true, // true on Render
+      sameSite: "none", // required for Netlify ↔ Render
+      maxAge: 30 * 24 * 60 * 60 * 1000,
     });
 
     res.status(201).json({
-      message: "User created! Please check your email to verify your account.",
+      message: "User registered successfully!",
+      token,
+      userId: user._id,
+      user,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -374,8 +377,7 @@ const resendVerification = async (req, res) => {
     const verifyLink = `${process.env.BASE_URL}/api/auth/verify-email/${verifyToken}`;
 
     // Send verification email asynchronously in the background so it doesn't block response
-    transporter.sendMail({
-      from: `"Chugli App" <${process.env.EMAIL_USER}>`,
+    sendEmail({
       to: email,
       subject: "Verify your Chugli account (Resent)",
       html: `
@@ -386,7 +388,7 @@ const resendVerification = async (req, res) => {
         </a>
       `,
     }).catch((err) => {
-      console.error("Nodemailer resend verification email error:", err);
+      console.error("Resend verification email error:", err);
     });
 
     res
