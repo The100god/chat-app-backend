@@ -48,7 +48,34 @@ exports.sendMessages = async (req, res) => {
 
     // Send the message to the receiver in real-time using Socket.io
     req.io.to(chatId.toString()).emit("newMessage", fullMessage);
-    // console.log("fullMessage", fullMessage);
+
+    // Real-time unread count calculation & emission for receiver
+    try {
+      const unreadCount = await Message.countDocuments({
+        sender: senderId,
+        receiver: receiverId,
+        isRead: false,
+        $or: [
+          { expiresAt: null },
+          { expiresAt: { $exists: false } },
+          { expiresAt: { $gt: new Date() } },
+        ],
+      });
+
+      if (receiverId) {
+        req.io.to(receiverId.toString()).emit("unreadMessageCountUpdated", {
+          friendId: senderId,
+          count: unreadCount,
+        });
+        req.io.to(receiverId.toString()).emit("update_unseen_count", {
+          friendId: senderId,
+          count: unreadCount,
+        });
+      }
+    } catch (countErr) {
+      console.error("Error calculating unread count in sendMessages:", countErr);
+    }
+
     return res.status(200).json(fullMessage);
   } catch (error) {
     return res.status(500).json(error);
