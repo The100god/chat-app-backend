@@ -190,9 +190,12 @@ const initializeSocket = (io) => {
         updatedMessages,
       });
 
-      const readerSocket = users.get(readerId);
-      if (readerSocket) {
-        io.to(readerSocket).emit("update_unseen_count", {
+      if (readerId) {
+        io.to(readerId.toString()).emit("update_unseen_count", {
+          friendId: senderId,
+          count: 0,
+        });
+        io.to(readerId.toString()).emit("unreadMessageCountUpdated", {
           friendId: senderId,
           count: 0,
         });
@@ -202,13 +205,13 @@ const initializeSocket = (io) => {
     socket.on(
       "sendMessage",
       async ({ chatId, senderId, content, receiverId }) => {
-        // console.log("rid", receiverId);
         try {
-          // Update unread count for receiver in real-time
-          // Exclude expired messages from unread count
+          const targetReceiverId = receiverId || (typeof receiverId === 'object' ? receiverId._id : null);
+          if (!targetReceiverId || !senderId) return;
+
           const unreadCount = await Message.countDocuments({
             sender: senderId,
-            receiver: receiverId,
+            receiver: targetReceiverId,
             isRead: false,
             $or: [
               { expiresAt: null },
@@ -217,13 +220,14 @@ const initializeSocket = (io) => {
             ],
           });
 
-          const receiverSocket = users.get(receiverId);
-          if (receiverSocket) {
-            io.to(receiverSocket).emit("unreadMessageCountUpdated", {
-              friendId: senderId,
-              count: unreadCount,
-            });
-          }
+          io.to(targetReceiverId.toString()).emit("unreadMessageCountUpdated", {
+            friendId: senderId,
+            count: unreadCount,
+          });
+          io.to(targetReceiverId.toString()).emit("update_unseen_count", {
+            friendId: senderId,
+            count: unreadCount,
+          });
         } catch (error) {
           console.error("Error sending message:", error);
         }
@@ -232,7 +236,8 @@ const initializeSocket = (io) => {
 
     // read unseen message — also set expiresAt for disappearing messages
     socket.on("mark_messages_read", async ({ senderId, receiverId }) => {
-      // Find unread messages to check for disappearDuration
+      if (!senderId || !receiverId) return;
+
       const unreadMessages = await Message.find({
         sender: senderId,
         receiver: receiverId,
@@ -257,14 +262,14 @@ const initializeSocket = (io) => {
         await Message.bulkWrite(bulkOps);
       }
 
-      // Send updated unread count to receiver
-      const receiverSocketId = users.get(receiverId);
-      if (receiverSocketId) {
-        io.to(receiverSocketId).emit("unreadMessageCountUpdated", {
-          friendId: senderId,
-          count: 0,
-        });
-      }
+      io.to(receiverId.toString()).emit("unreadMessageCountUpdated", {
+        friendId: senderId,
+        count: 0,
+      });
+      io.to(receiverId.toString()).emit("update_unseen_count", {
+        friendId: senderId,
+        count: 0,
+      });
     });
 
     socket.on("sendFriendRequest", async ({ senderId, receiverId }) => {
