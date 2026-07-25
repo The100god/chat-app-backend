@@ -65,6 +65,7 @@ const initializeSocket = (io) => {
               sender: friend._id,
               receiver: userId,
               isRead: false,
+              deletedFor: { $ne: userId },
               $or: [
                 { expiresAt: null },
                 { expiresAt: { $exists: false } },
@@ -123,6 +124,7 @@ const initializeSocket = (io) => {
                   sender: friend._id,
                   receiver: receiverId,
                   isRead: false,
+                  deletedFor: { $ne: receiverId },
                   $or: [
                     { expiresAt: null },
                     { expiresAt: { $exists: false } },
@@ -214,6 +216,7 @@ const initializeSocket = (io) => {
             sender: senderId,
             receiver: targetReceiverId,
             isRead: false,
+            deletedFor: { $ne: targetReceiverId },
             $or: [
               { expiresAt: null },
               { expiresAt: { $exists: false } },

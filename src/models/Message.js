@@ -34,6 +34,12 @@ const messageSchema = new mongoose.Schema({
         type: Number,  // Duration in hours (1, 4, 8, 12, 24). null/0 = permanent.
         default: null,
     },
+    deletedFor: [
+        {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+        }
+    ],
 
 },
 { timestamps: true });
@@ -48,5 +54,9 @@ messageSchema.index(
         partialFilterExpression: { expiresAt: { $type: "date" } },
     }
 );
+
+messageSchema.index({ chatId: 1 });
+messageSchema.index({ receiver: 1, isRead: 1 });
+messageSchema.index({ sender: 1, receiver: 1, isRead: 1 });
 
 module.exports = mongoose.model("Message", messageSchema)

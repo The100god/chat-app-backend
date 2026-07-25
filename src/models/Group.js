@@ -33,4 +33,6 @@ const GroupSchema = new mongoose.Schema({
   },
 });
 
+GroupSchema.index({ groupMember: 1 });
+
 module.exports = mongoose.model("Group", GroupSchema)

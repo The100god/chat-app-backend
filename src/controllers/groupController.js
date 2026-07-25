@@ -151,9 +151,16 @@ const SendGroupMessageToDb = async (req, res) => {
 
 const GetGroupMessages = async (req, res) => {
   try {
-    const message = await GroupMessage.find({
+    const { userId } = req.query;
+    const query = {
       groupId: req.params.groupId,
-    }).populate("sender", "_id groupProfilePic groupName");
+    };
+
+    if (userId) {
+      query.deletedFor = { $ne: userId };
+    }
+
+    const message = await GroupMessage.find(query).populate("sender", "_id groupProfilePic groupName");
     // console.log("group message", message);
     return res.status(200).json(message);
   } catch (error) {

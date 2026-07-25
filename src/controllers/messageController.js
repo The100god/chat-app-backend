@@ -1,5 +1,6 @@
 const Chat = require("../models/Chat");
 const Message = require("../models/Message");
+const GroupMessage = require("../models/GroupMessage");
 const cloudinary = require("../utils/cloudinary");
 const { sendPushNotification } = require("../utils/webPushHelper");
 
@@ -56,6 +57,7 @@ exports.sendMessages = async (req, res) => {
         sender: senderId,
         receiver: receiverId,
         isRead: false,
+        deletedFor: { $ne: receiverId },
         $or: [
           { expiresAt: null },
           { expiresAt: { $exists: false } },
@@ -75,9 +77,10 @@ exports.sendMessages = async (req, res) => {
 
         // Trigger background push notification
         if (receiverId.toString() !== senderId.toString()) {
-          const totalUnread = await Message.countDocuments({
+           const totalUnread = await Message.countDocuments({
             receiver: receiverId,
             isRead: false,
+            deletedFor: { $ne: receiverId },
             $or: [
               { expiresAt: null },
               { expiresAt: { $exists: false } },
@@ -110,15 +113,22 @@ exports.sendMessages = async (req, res) => {
 
 exports.getMessages = async (req, res) => {
   try {
+    const { userId } = req.query;
     // Exclude expired messages (double safety — even if MongoDB TTL hasn't cleaned up yet)
-    const message = await Message.find({
+    const query = {
       chatId: req.params.chatId,
       $or: [
         { expiresAt: null },
         { expiresAt: { $exists: false } },
         { expiresAt: { $gt: new Date() } },
       ],
-    }).populate("sender", "-password");
+    };
+
+    if (userId) {
+      query.deletedFor = { $ne: userId };
+    }
+
+    const message = await Message.find(query).populate("sender", "-password");
     // console.log("getMessage", message)
     return res.status(200).json(message);
   } catch (error) {
@@ -160,6 +170,71 @@ exports.markMessage = async (req, res) => {
       .json({ message: "Messages marked as read", result: result });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+};
+
+exports.clearChat = async (req, res) => {
+  const { chatId, userId } = req.body;
+  if (!chatId || !userId) {
+    return res.status(400).json({ message: "chatId and userId are required" });
+  }
+
+  try {
+    // Attempt to clear from Message collection
+    await Message.updateMany(
+      { chatId },
+      { $addToSet: { deletedFor: userId } }
+    );
+
+    // Attempt to clear from GroupMessage collection (chatId is the groupId in group chats)
+    await GroupMessage.updateMany(
+      { groupId: chatId },
+      { $addToSet: { deletedFor: userId } }
+    );
+
+    return res.status(200).json({ message: "Chat cleared successfully for the user" });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+exports.deleteMessage = async (req, res) => {
+  const { messageId, userId, isGroup } = req.body;
+  if (!messageId || !userId) {
+    return res.status(400).json({ message: "messageId and userId are required" });
+  }
+
+  try {
+    const Model = isGroup ? GroupMessage : Message;
+    const message = await Model.findById(messageId);
+
+    if (!message) {
+      return res.status(404).json({ message: "Message not found" });
+    }
+
+    const ageInMs = Date.now() - new Date(message.createdAt).getTime();
+    const oneHourInMs = 60 * 60 * 1000;
+
+    if (ageInMs > oneHourInMs) {
+      // Older than 1 hour -> delete only for this user
+      message.deletedFor.push(userId);
+      await message.save();
+      return res.status(200).json({ message: "Message deleted for you." });
+    } else {
+      // Younger than 1 hour -> delete from both sides (completely from database)
+      await Model.findByIdAndDelete(messageId);
+
+      // Emit socket event to notify other clients in the room/group
+      const room = isGroup ? message.groupId : message.chatId;
+      if (room && req.io) {
+        req.io.to(room.toString()).emit("messageDeleted", { messageId });
+      }
+
+      return res.status(200).json({ message: "Message deleted for everyone." });
+    }
+  } catch (error) {
+    console.error("Error in deleteMessage controller:", error);
+    return res.status(500).json({ message: error.message });
   }
 };
 

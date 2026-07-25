@@ -23,4 +23,6 @@ const chatSchema = new mongoose.Schema({
   { timestamps: true }
 )
 
+chatSchema.index({ members: 1 });
+
 module.exports = mongoose.model("Chat", chatSchema);
