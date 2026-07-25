@@ -1,6 +1,7 @@
 const Chat = require("../models/Chat");
 const Message = require("../models/Message");
 const cloudinary = require("../utils/cloudinary");
+const { sendPushNotification } = require("../utils/webPushHelper");
 
 
 exports.sendMessages = async (req, res) => {
@@ -41,7 +42,7 @@ exports.sendMessages = async (req, res) => {
 
     await Chat.findByIdAndUpdate(chatId, { lastMessage: savedMessage._id });
     // Populate sender data
-    const fullMessage = await savedMessage.populate(
+    const fullMessage = await Message.findById(savedMessage._id).populate(
       "sender",
       "_id username profilePic"
     );
@@ -71,6 +72,31 @@ exports.sendMessages = async (req, res) => {
           friendId: senderId,
           count: unreadCount,
         });
+
+        // Trigger background push notification
+        if (receiverId.toString() !== senderId.toString()) {
+          const totalUnread = await Message.countDocuments({
+            receiver: receiverId,
+            isRead: false,
+            $or: [
+              { expiresAt: null },
+              { expiresAt: { $exists: false } },
+              { expiresAt: { $gt: new Date() } },
+            ],
+          });
+
+          sendPushNotification(receiverId, {
+            title: "Chugli",
+            body: "New message received!",
+            icon: "/icon-192.png",
+            badge: "/icon-192.png",
+            badgeCount: totalUnread,
+            data: {
+              chatId: chatId,
+              senderId: senderId,
+            },
+          }).catch(err => console.error("Error in background push notify:", err));
+        }
       }
     } catch (countErr) {
       console.error("Error calculating unread count in sendMessages:", countErr);

@@ -1,7 +1,15 @@
 // routes/userRoute.js
 const express = require("express");
 const router = express.Router();
-const { searchUsersByUsername, getUserProfile, updateUserProfile, deleteAccount  } = require("../controllers/userController");
+const {
+  searchUsersByUsername,
+  getUserProfile,
+  updateUserProfile,
+  deleteAccount,
+  subscribePush,
+  unsubscribePush,
+  getVapidPublicKey,
+} = require("../controllers/userController");
 const { protect, changePasswordLimiter } = require("../middleware/authMiddleware");
 const { changePassword } = require("../controllers/authController");
 
@@ -17,5 +25,10 @@ router.put("/changePassword", protect, changePasswordLimiter, changePassword)
 
 // Delete account
 router.delete("/deleteAccount", protect, deleteAccount);
+
+// Push notifications routes
+router.post("/subscribe", protect, subscribePush);
+router.post("/unsubscribe", protect, unsubscribePush);
+router.get("/vapid-public-key", getVapidPublicKey);
 
 module.exports = router;
