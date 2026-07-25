@@ -131,4 +131,64 @@ const deleteAccount = async (req, res) => {
   }
 };
 
-module.exports = { searchUsersByUsername, getUserProfile, updateUserProfile, deleteAccount };
+// Push Subscription controllers
+const subscribePush = async (req, res) => {
+  const { subscription } = req.body;
+  if (!subscription || !subscription.endpoint) {
+    return res.status(400).json({ message: "Subscription with endpoint is required." });
+  }
+
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // Check if subscription endpoint already exists to avoid duplicates
+    const exists = user.pushSubscriptions.some(
+      (sub) => sub.endpoint === subscription.endpoint
+    );
+
+    if (!exists) {
+      user.pushSubscriptions.push(subscription);
+      await user.save();
+    }
+
+    res.status(200).json({ message: "Successfully subscribed to push notifications" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const unsubscribePush = async (req, res) => {
+  const { endpoint } = req.body;
+  if (!endpoint) {
+    return res.status(400).json({ message: "Endpoint is required to unsubscribe." });
+  }
+
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    user.pushSubscriptions = user.pushSubscriptions.filter(
+      (sub) => sub.endpoint !== endpoint
+    );
+    await user.save();
+
+    res.status(200).json({ message: "Successfully unsubscribed from push notifications" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getVapidPublicKey = async (req, res) => {
+  res.status(200).json({ publicKey: process.env.VAPID_PUBLIC_KEY });
+};
+
+module.exports = {
+  searchUsersByUsername,
+  getUserProfile,
+  updateUserProfile,
+  deleteAccount,
+  subscribePush,
+  unsubscribePush,
+  getVapidPublicKey,
+};

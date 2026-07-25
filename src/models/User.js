@@ -41,7 +41,16 @@ const UserSchema = new mongoose.Schema({
       },
     ],
     isVerified: { type: Boolean, default: false }, // Email verification status
-    
+    pushSubscriptions: [
+      {
+        endpoint: { type: String, required: true },
+        expirationTime: { type: String },
+        keys: {
+          p256dh: { type: String, required: true },
+          auth: { type: String, required: true },
+        },
+      },
+    ],
 })
 
 UserSchema.pre("save", async function (next) {

@@ -9,6 +9,7 @@ const Chat = require("../models/Chat");
 const { SendGroupMessageToDb } = require("../controllers/groupController");
 const Group = require("../models/Group");
 const GroupMessage = require("../models/GroupMessage");
+const { sendPushNotification } = require("./webPushHelper");
 const users = new Map(); // userId -> socket.id
 const groups = new Map(); // groupId -> { members, admins, chatName }
 
@@ -295,6 +296,18 @@ const initializeSocket = (io) => {
             profilePic: sender.profilePic,
           });
         }
+
+        // Trigger background push notification for friend request
+        sendPushNotification(receiverId, {
+          title: "Chugli",
+          body: "New friend request received!",
+          icon: "/icon-192.png",
+          badge: "/icon-192.png",
+          data: {
+            type: "friend_request",
+            senderId: senderId,
+          },
+        }).catch((err) => console.error("Error in friend request push sending:", err));
 
         // Confirm to sender that request was sent
         const senderSocketId = users.get(senderId);

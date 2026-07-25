@@ -78,6 +78,8 @@ const GetAllGroups = async (req, res) => {
 
 // send message
 
+const { sendPushNotification } = require("../utils/webPushHelper");
+
 const SendGroupMessageToDb = async (req, res) => {
   // console.log("reqbody", req.body);
   const { groupId, senderId, content, media = [] } = req.body;
@@ -112,6 +114,31 @@ const SendGroupMessageToDb = async (req, res) => {
     // console.log("grouppopMessage", populateMessage);
 
     req.io.to(groupId).emit("newGroupMessage", populateMessage);
+
+    // Group Push Notification Trigger
+    try {
+      const group = await Group.findById(groupId);
+      if (group) {
+        // Find other members
+        const otherMembers = group.groupMember.filter(
+          (mId) => mId.toString() !== senderId.toString()
+        );
+
+        otherMembers.forEach((memberId) => {
+          sendPushNotification(memberId, {
+            title: "Chugli",
+            body: "New message received!",
+            icon: "/icon-192.png",
+            badge: "/icon-192.png",
+            data: {
+              groupId: groupId,
+            },
+          }).catch((err) => console.error("Error in group push sending:", err));
+        });
+      }
+    } catch (pushErr) {
+      console.error("Failed to query group or send group push notifications:", pushErr);
+    }
 
     return res.status(200).json(populateMessage);
   } catch (err) {
