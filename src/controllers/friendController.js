@@ -128,6 +128,7 @@ const handleFriendRequestSocket = async ({ senderId, receiverId, status,io, user
            sender: friend._id,
            receiver: userId,
            isRead: false,
+           deletedFor: { $ne: userId },
            $or: [
              { expiresAt: null },
              { expiresAt: { $exists: false } },
@@ -209,6 +210,7 @@ const getFriends = async (req, res) => {
             sender: friend._id,
             receiver: userId, // Check messages where friend is sender and user is receiver
             isRead: false, // Only count unread messages
+            deletedFor: { $ne: userId },
             $or: [
               { expiresAt: null },
               { expiresAt: { $exists: false } },

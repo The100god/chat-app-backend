@@ -29,8 +29,16 @@ const GroupMessageSchema = new mongoose.Schema({
         type:Boolean,
         default:false,
     },
+    deletedFor: [
+        {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+        }
+    ],
 },
 {timestamps:true}
 );
+
+GroupMessageSchema.index({ groupId: 1 });
 
 module.exports = mongoose.model("GroupMessage", GroupMessageSchema)
