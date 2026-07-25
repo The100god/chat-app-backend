@@ -243,14 +243,47 @@ const getFriends = async (req, res) => {
   }
 };
 
-// Remove a Friend
+const fetchFriendDetails = async (userId) => {
+  const user = await User.findById(userId).populate(
+    "friends",
+    "username profilePic"
+  );
+  if (!user) return [];
+  const friendDetails = await Promise.all(
+    user.friends.map(async (friend) => {
+      const unreadMessagesCount = await Message.countDocuments({
+        sender: friend._id,
+        receiver: userId,
+        isRead: false,
+        deletedFor: { $ne: userId },
+        $or: [
+          { expiresAt: null },
+          { expiresAt: { $exists: false } },
+          { expiresAt: { $gt: new Date() } },
+        ],
+      });
+      return {
+        friendId: friend._id,
+        username: friend.username,
+        profilePic: friend.profilePic,
+        unreadMessagesCount,
+      };
+    })
+  );
+  return friendDetails;
+};
 
+// Remove a Friend
 const removeFriend = async (req, res) => {
   const { userId, friendId } = req.body;
 
   try {
     const user = await User.findById(userId);
     const friend = await User.findById(friendId);
+
+    if (!user || !friend) {
+      return res.status(404).json({ message: "User not found." });
+    }
 
     if (!user.friends.includes(friendId)) {
       return res
@@ -264,6 +297,31 @@ const removeFriend = async (req, res) => {
 
     await user.save();
     await friend.save();
+
+    // Delete all chats and messages between them
+    const Chat = require("../models/Chat");
+    const chats = await Chat.find({
+      isGroupChat: false,
+      members: { $all: [userId, friendId] }
+    });
+    const chatIds = chats.map(c => c._id);
+    if (chatIds.length > 0) {
+      await Message.deleteMany({ chatId: { $in: chatIds } });
+      await Chat.deleteMany({ _id: { $in: chatIds } });
+    }
+
+    // Get updated lists
+    const userFriendsList = await fetchFriendDetails(userId);
+    const friendFriendsList = await fetchFriendDetails(friendId);
+
+    // Emit live updates to both rooms (userId and friendId room)
+    if (req.io) {
+      req.io.to(userId).emit("friendsUpdated", userFriendsList);
+      req.io.to(friendId).emit("friendsUpdated", friendFriendsList);
+      req.io.to(userId).emit("friendRemoved", { friendId });
+      req.io.to(friendId).emit("friendRemoved", { friendId: userId });
+    }
+
     res.status(200).json({ message: "Friend removed successfully." });
   } catch (err) {
     res.status(500).json({ error: err.message });

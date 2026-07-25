@@ -1,8 +1,8 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const dotenv = require("dotenv");
-const {createServer} = require("http");
-const {Server} = require("socket.io");
+const { createServer } = require("http");
+const { Server } = require("socket.io");
 
 const cors = require("cors");
 const authRoutes = require("./routes/authRoutes");
@@ -13,11 +13,19 @@ const userRoutes = require("./routes/userRoute");
 const groupRoutes = require("./routes/groupRoutes");
 const { initializeSocket } = require("./utils/socketManager");
 const cookieParser = require("cookie-parser");
+const helmet = require("helmet");
+const mongoSanitize = require("express-mongo-sanitize");
+const rateLimit = require("express-rate-limit");
 
 dotenv.config();
 const app = express();
 
 app.use(cookieParser());
+
+// Security Middleware
+app.use(helmet());
+app.use(mongoSanitize());
+app.disable("x-powered-by");
 
 
 // middleware
@@ -26,7 +34,7 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(
   cors({
     origin: process.env.CLIENT_URL,
-    credentials: true, // 🔴 REQUIRED
+    credentials: true, // REQUIRED
   })
 );
 
@@ -60,18 +68,37 @@ const io = new Server(httpServer, {
 initializeSocket(io);
 
 //Attach Socket.io to req in all routes
-app.use((req, res, next)=>{
-    req.io = io;
-    next();
+app.use((req, res, next) => {
+  req.io = io;
+  next();
 })
 
+// Rate limiting configuration
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many login/signup attempts from this IP, please try again after 15 minutes." }
+});
+
 //Routes
-app.use("/api/auth", authRoutes);
+app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/friends", friendRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/message", messageRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/groups", groupRoutes);
+
+// Health check endpoint
+app.get("/api/health", (req, res) => {
+  res.status(200).json({
+    status: "UP",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    dbState: mongoose.connection.readyState === 1 ? "CONNECTED" : "DISCONNECTED"
+  });
+});
 
 //connect MongoDb
 
@@ -83,8 +110,8 @@ mongoose
   .then(() => console.log("MongoDb Connected"))
   .catch((error) => console.log("MongoDb Connection Error: ", error));
 
-  const PORT = process.env.PORT || 5000;
-  httpServer.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-  
+const PORT = process.env.PORT || 5000;
+httpServer.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
 
 module.exports = app;
