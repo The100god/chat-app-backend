@@ -82,6 +82,47 @@ const authLimiter = rateLimit({
   message: { message: "Too many login/signup attempts from this IP, please try again after 15 minutes." }
 });
 
+const path = require("path");
+const upload = require("./middleware/upload");
+const { uploadMediaToCloudinary, uploadUrlToCloudinary } = require("./utils/cloudinaryHelper");
+
+// Serve static uploaded media files with permissive CORS (legacy fallback)
+app.use("/uploads", cors(), express.static(path.join(__dirname, "../uploads")));
+
+// Direct Media Upload Endpoint for Watch & Listen Together (Cloudinary + MongoDB)
+app.post("/api/upload", upload.single("file"), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: "No file uploaded" });
+  }
+  try {
+    const roomId = req.body.roomId || req.query.roomId || "temp";
+    const result = await uploadMediaToCloudinary(
+      req.file.path,
+      req.file.originalname,
+      roomId
+    );
+    res.json(result);
+  } catch (err) {
+    console.error("Error in /api/upload route:", err);
+    res.status(500).json({ error: "Media upload failed", message: err.message });
+  }
+});
+
+// Remote URL Upload Endpoint for Watch & Listen Together (Cloudinary + MongoDB)
+app.post("/api/upload-url", express.json(), async (req, res) => {
+  const { url, roomId, title } = req.body;
+  if (!url) {
+    return res.status(400).json({ error: "No URL provided" });
+  }
+  try {
+    const result = await uploadUrlToCloudinary(url, title || "media", roomId || "temp");
+    res.json(result);
+  } catch (err) {
+    console.error("Error in /api/upload-url route:", err);
+    res.status(500).json({ error: "URL upload to Cloudinary failed", message: err.message });
+  }
+});
+
 //Routes
 app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/friends", friendRoutes);

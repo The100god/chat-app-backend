@@ -10,6 +10,58 @@ const { SendGroupMessageToDb } = require("../controllers/groupController");
 const Group = require("../models/Group");
 const GroupMessage = require("../models/GroupMessage");
 const { sendPushNotification } = require("./webPushHelper");
+const {
+  getSocketUserId,
+  validateFriendship,
+  createRoom,
+  joinRoom,
+  leaveRoom,
+  closeRoom,
+  switchGame,
+  updateRoomState,
+  getRoom,
+  getRoomForUser,
+  getRejoinableRoomsForUser,
+  handleDisconnect: handleTogetherDisconnect,
+  makeTicTacToeMove,
+  restartTicTacToeGame,
+  startTicTacToeGame,
+  addTicTacToeComment,
+  swapTicTacToeFirstPlayer,
+  submitRPSChoice,
+  nextRPSRound,
+  restartRPSGame,
+  makeConnect4Move,
+  startConnect4Game,
+  swapConnect4FirstPlayer,
+  restartConnect4Game,
+  flipMemoryCard,
+  resetMemoryFlippedCards,
+  swapMemoryFirstPlayer,
+  startMemoryGame,
+  restartMemoryGame,
+  addDrawingElement,
+  clearDrawingBoard,
+  switchDrawingMode,
+  submitSecretDrawing,
+  resetSecretMindMatch,
+  submitMindMatchChoice,
+  resetMindMatch,
+  submitQuizAnswer,
+  swapQuizFirstPlayer,
+  startQuizGame,
+  submitCustomQuizQuestion,
+  restartQuizGame,
+  submitActivityAnswer,
+  nextActivityPrompt,
+  selectTruthOrDare,
+  submitTruthOrDareQuestion,
+  submitTruthOrDareAnswer,
+  switchActivityCategory,
+  switchActivity,
+  updateWatchState,
+  updateMusicState,
+} = require("./togetherRoomManager");
 const users = new Map(); // userId -> socket.id
 const groups = new Map(); // groupId -> { members, admins, chatName }
 
@@ -503,20 +555,23 @@ const initializeSocket = (io) => {
           $ne: readerId,
         },
       },
-      {$addToSet:{seenBy:readerId
+        {
+          $addToSet: {
+            seenBy: readerId
 
-      }}
+          }
+        }
 
-    );
+      );
 
-    const updatedMessages = await GroupMessage.find({ groupId })
-    .populate("sender", "_id username profilePic")
-    .populate("seenBy", "_id username profilePic");
+      const updatedMessages = await GroupMessage.find({ groupId })
+        .populate("sender", "_id username profilePic")
+        .populate("seenBy", "_id username profilePic");
 
-    // console.log("updatedMessages", updatedMessages)
-    io.to(groupId).emit("groupSeenUpdate", {
-      groupId, messages: updatedMessages 
-    })
+      // console.log("updatedMessages", updatedMessages)
+      io.to(groupId).emit("groupSeenUpdate", {
+        groupId, messages: updatedMessages
+      })
     });
 
     socket.on("addToGroup", ({ groupId, adminId, newMemberId }) => {
@@ -550,12 +605,615 @@ const initializeSocket = (io) => {
       }
     });
 
+    // ═══════════════════════════════════════════════════
+    // Together Room Events
+    // ═══════════════════════════════════════════════════
+
+    socket.on("together:create", async ({ type, gameId, targetUserId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = createRoom(userId, type, gameId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${result.room.roomId}`;
+      socket.join(roomSocketId);
+      socket.emit("together:created", result.room);
+      io.to(roomSocketId).emit("together:state", result.room);
+
+      // If a target user was selected to invite
+      if (targetUserId) {
+        try {
+          const isFriend = await validateFriendship(userId, targetUserId);
+          if (isFriend) {
+            const hostUser = await User.findById(userId).select("username profilePic");
+
+            io.to(targetUserId.toString()).emit("together:inviteReceived", {
+              roomId: result.room.roomId,
+              roomType: type,
+              gameId: gameId || "tictactoe",
+              hostId: userId.toString(),
+              hostUsername: hostUser?.username || "Friend",
+              hostProfilePic: hostUser?.profilePic,
+            });
+
+            sendPushNotification(targetUserId, {
+              title: "Chugli Together Invite",
+              body: `${hostUser?.username || "A friend"} invited you to join a ${type} session!`,
+              icon: "/icon-192.png",
+              badge: "/icon-192.png",
+              data: {
+                type: "together_invite",
+                roomId: result.room.roomId,
+                roomType: type,
+                gameId: gameId || "tictactoe",
+                hostId: userId,
+              },
+            }).catch((err) => console.error("Error sending together invite push:", err));
+          }
+        } catch (err) {
+          console.error("Error sending room invitation:", err);
+        }
+      }
+    });
+
+    socket.on("together:join", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      // Validate room exists
+      const existingRoom = getRoom(roomId);
+      if (!existingRoom) return socket.emit("together:error", { message: "Room not found" });
+
+      // Validate friendship with host
+      const isFriend = await validateFriendship(userId, existingRoom.hostId);
+      if (!isFriend && userId !== existingRoom.hostId) {
+        return socket.emit("together:error", { message: "You must be friends with the host to join" });
+      }
+
+      const result = joinRoom(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      socket.join(roomSocketId);
+      io.to(roomSocketId).emit("together:joined", { userId, room: result.room });
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:leave", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = leaveRoom(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      socket.leave(roomSocketId);
+
+      if (result.closed) {
+        // Room was closed (host left) — notify all remaining participants
+        io.to(roomSocketId).emit("together:closed", { roomId, reason: "host_left" });
+        io.emit("together:roomClosed", { roomId });
+        // Force all sockets to leave the room channel
+        io.in(roomSocketId).socketsLeave(roomSocketId);
+      } else {
+        io.to(roomSocketId).emit("together:left", { userId, room: result.room });
+        io.to(roomSocketId).emit("together:state", result.room);
+      }
+
+      socket.emit("together:state", null);
+    });
+
+    socket.on("together:close", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = closeRoom(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:closed", { roomId, reason: "host_closed" });
+      io.emit("together:roomClosed", { roomId });
+      // Force all sockets to leave the room channel
+      io.in(roomSocketId).socketsLeave(roomSocketId);
+    });
+
+    socket.on("together:switchGame", async ({ roomId, gameId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = switchGame(roomId, userId, gameId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:update", async ({ roomId, patch }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      if (!patch || typeof patch !== "object") {
+        return socket.emit("together:error", { message: "Invalid state patch" });
+      }
+
+      const result = updateRoomState(roomId, userId, patch);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:tictactoe:move", async ({ roomId, cellIndex }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = makeTicTacToeMove(roomId, userId, cellIndex);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:tictactoe:restart", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = restartTicTacToeGame(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:tictactoe:comment", async ({ roomId, text }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = addTicTacToeComment(roomId, userId, text);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:tictactoe:swapFirstTurn", async ({ roomId, firstPlayerId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = swapTicTacToeFirstPlayer(roomId, userId, firstPlayerId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:tictactoe:startGame", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = startTicTacToeGame(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    // ─── Rock Paper Scissors Listeners ───
+    socket.on("together:rps:choice", async ({ roomId, choice }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = submitRPSChoice(roomId, userId, choice);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:rps:nextRound", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = nextRPSRound(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:rps:restart", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = restartRPSGame(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    // ─── Connect 4 Listeners ───
+    socket.on("together:connect4:dropToken", async ({ roomId, colIndex }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = makeConnect4Move(roomId, userId, colIndex);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:connect4:startGame", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = startConnect4Game(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:connect4:swapFirstTurn", async ({ roomId, firstPlayerId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = swapConnect4FirstPlayer(roomId, userId, firstPlayerId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:connect4:restart", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = restartConnect4Game(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    // ─── Memory Match Listeners ───
+    socket.on("together:memory:flipCard", async ({ roomId, cardIndex }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = flipMemoryCard(roomId, userId, cardIndex);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:memory:resetFlipped", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = resetMemoryFlippedCards(roomId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:memory:swapFirstTurn", async ({ roomId, firstPlayerId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = swapMemoryFirstPlayer(roomId, userId, firstPlayerId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:memory:startGame", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = startMemoryGame(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:memory:restart", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = restartMemoryGame(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    // ─── Drawing Board Listeners ───
+    socket.on("together:drawing:addElement", async ({ roomId, element }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = addDrawingElement(roomId, userId, element);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:drawing:clear", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = clearDrawingBoard(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:drawing:switchMode", async ({ roomId, mode }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = switchDrawingMode(roomId, userId, mode);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:drawing:submitSecret", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = submitSecretDrawing(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:drawing:resetSecret", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = resetSecretMindMatch(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:drawing:resetMindMatch", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = resetMindMatch(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    // ─── Trivia Quiz Listeners ───
+    socket.on("together:quiz:swapFirstTurn", async ({ roomId, firstPlayerId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = swapQuizFirstPlayer(roomId, userId, firstPlayerId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:quiz:startGame", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = startQuizGame(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:quiz:submitCustomQuestion", async ({ roomId, questionText, audioData, options, correctIndex }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = submitCustomQuizQuestion(roomId, userId, { questionText, audioData, options, correctIndex });
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:quiz:submitAnswer", async ({ roomId, questionIndex, optionIndex }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = submitQuizAnswer(roomId, userId, questionIndex, optionIndex);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:quiz:restart", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = restartQuizGame(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    // ─── Couple Activities Listeners ───
+    socket.on("together:activity:submitAnswer", async ({ roomId, answer }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = submitActivityAnswer(roomId, userId, answer);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:activity:nextPrompt", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = nextActivityPrompt(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:activity:selectTruthOrDare", async ({ roomId, choice }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = selectTruthOrDare(roomId, userId, choice);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:activity:submitTruthOrDareQuestion", async ({ roomId, customText, audioData }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = submitTruthOrDareQuestion(roomId, userId, customText, audioData);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:activity:submitTruthOrDareAnswer", async ({ roomId, answerText, audioData }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = submitTruthOrDareAnswer(roomId, userId, answerText, audioData);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:activity:switchCategory", async ({ roomId, category }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = switchActivityCategory(roomId, userId, category);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:activity:switchActivity", async ({ roomId, newActivityId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = switchActivity(roomId, userId, newActivityId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:watch:updateState", async ({ roomId, action, position, mediaUrl, mediaTitle, text, username }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = updateWatchState(roomId, userId, { action, position, mediaUrl, mediaTitle, text, username });
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:music:updateState", async ({ roomId, action, position, trackIndex, track, text, username }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = updateMusicState(roomId, userId, { action, position, trackIndex, track, text, username });
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:getState", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      // If roomId provided, get that room; otherwise get user's current room
+      let room;
+      if (roomId) {
+        room = getRoom(roomId);
+        if (room && !room.participants.includes(userId)) {
+          return socket.emit("together:error", { message: "You are not in this room" });
+        }
+      } else {
+        room = getRoomForUser(userId);
+      }
+
+      socket.emit("together:state", room || null);
+
+      // If user is in a room, make sure they're in the socket room channel (reconnect case)
+      if (room) {
+        socket.join(`together:${room.roomId}`);
+      }
+    });
+
+    socket.on("together:getRejoinableRooms", async () => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return;
+
+      const rejoinableRooms = await getRejoinableRoomsForUser(userId);
+      socket.emit("together:rejoinableRooms", rejoinableRooms);
+    });
+
+    // ═══════════════════════════════════════════════════
+    // Disconnect
+    // ═══════════════════════════════════════════════════
+
     socket.on("disconnect", () => {
+      let disconnectedUserId = null;
       for (let [key, value] of users.entries()) {
         if (value === socket.id) {
-          // console.log(`❌ User ${key} disconnected.`);
+          disconnectedUserId = key;
           users.delete(key);
           break;
+        }
+      }
+
+      // Auto-leave Together room on disconnect
+      if (disconnectedUserId) {
+        const result = handleTogetherDisconnect(disconnectedUserId);
+        if (result && result.roomId) {
+          const roomSocketId = `together:${result.roomId}`;
+          if (result.closed) {
+            io.to(roomSocketId).emit("together:closed", { roomId: result.roomId, reason: "host_disconnected" });
+            io.in(roomSocketId).socketsLeave(roomSocketId);
+          } else if (result.room) {
+            io.to(roomSocketId).emit("together:left", { userId: disconnectedUserId, room: result.room });
+            io.to(roomSocketId).emit("together:state", result.room);
+          }
         }
       }
     });
