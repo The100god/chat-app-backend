@@ -520,13 +520,28 @@ function makeTicTacToeMove(roomId, userId, cellIndex) {
 /**
  * Update session statistics for a room.
  */
-function updateSessionStats(room, winnerId, loserId, isDraw = false) {
+function updateSessionStats(room, winnerId, loserId, isDraw = false, gameId = null) {
   if (!room.sessionStats) room.sessionStats = {};
+  const activeGame = gameId || room.gameId;
+
   room.participants.forEach((pId) => {
+    // Overall stats per user
     if (!room.sessionStats[pId]) {
       room.sessionStats[pId] = { wins: 0, losses: 0, ties: 0, total: 0 };
     }
+    // Per-game stats per user
+    if (activeGame) {
+      const gUserKey = `${activeGame}_${pId}`;
+      if (!room.sessionStats[gUserKey]) {
+        room.sessionStats[gUserKey] = { wins: 0, losses: 0, ties: 0, total: 0 };
+      }
+    }
   });
+
+  // Per-game overall stats
+  if (activeGame && !room.sessionStats[activeGame]) {
+    room.sessionStats[activeGame] = { wins: 0, losses: 0, ties: 0, total: 0 };
+  }
 
   if (isDraw) {
     room.participants.forEach((pId) => {
@@ -534,15 +549,48 @@ function updateSessionStats(room, winnerId, loserId, isDraw = false) {
         room.sessionStats[pId].ties += 1;
         room.sessionStats[pId].total += 1;
       }
+      if (activeGame) {
+        const gUserKey = `${activeGame}_${pId}`;
+        if (room.sessionStats[gUserKey]) {
+          room.sessionStats[gUserKey].ties += 1;
+          room.sessionStats[gUserKey].total += 1;
+        }
+      }
     });
-  } else {
-    if (winnerId && room.sessionStats[winnerId]) {
-      room.sessionStats[winnerId].wins += 1;
-      room.sessionStats[winnerId].total += 1;
+    if (activeGame && room.sessionStats[activeGame]) {
+      room.sessionStats[activeGame].ties += 1;
+      room.sessionStats[activeGame].total += 1;
     }
-    if (loserId && room.sessionStats[loserId]) {
-      room.sessionStats[loserId].losses += 1;
-      room.sessionStats[loserId].total += 1;
+  } else {
+    if (winnerId) {
+      if (room.sessionStats[winnerId]) {
+        room.sessionStats[winnerId].wins += 1;
+        room.sessionStats[winnerId].total += 1;
+      }
+      if (activeGame) {
+        const winKey = `${activeGame}_${winnerId}`;
+        if (room.sessionStats[winKey]) {
+          room.sessionStats[winKey].wins += 1;
+          room.sessionStats[winKey].total += 1;
+        }
+      }
+    }
+    if (loserId) {
+      if (room.sessionStats[loserId]) {
+        room.sessionStats[loserId].losses += 1;
+        room.sessionStats[loserId].total += 1;
+      }
+      if (activeGame) {
+        const loseKey = `${activeGame}_${loserId}`;
+        if (room.sessionStats[loseKey]) {
+          room.sessionStats[loseKey].losses += 1;
+          room.sessionStats[loseKey].total += 1;
+        }
+      }
+    }
+    if (activeGame && room.sessionStats[activeGame]) {
+      if (winnerId) room.sessionStats[activeGame].wins += 1;
+      room.sessionStats[activeGame].total += 1;
     }
   }
 }
