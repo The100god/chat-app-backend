@@ -9,7 +9,10 @@ router.post("/", sendMessages);
 router.post("/clear-chat", clearChat);
 router.post("/delete-message", deleteMessage);
 router.get("/:chatId", getMessages)
-router.put("/mark-read", markMessage) 
+router.put("/mark-read", markMessage);
+router.post("/mark-read", markMessage);
+router.post("/markMessage", markMessage);
+router.put("/markMessage", markMessage);
 
 
 module.exports = router

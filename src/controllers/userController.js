@@ -2,27 +2,31 @@ const mongoose = require("mongoose");
 const User = require("../models/User");
 const cloudinary = require("../utils/cloudinary");
 
-// Search users by username
+// Search users by username (returns all users if query is empty)
 const searchUsersByUsername = async (req, res) => {
   const { username, userId } = req.query;
 
   if (
-    !username ||
     !userId ||
     userId === "null" ||
     userId === "undefined" ||
     !mongoose.Types.ObjectId.isValid(userId)
   ) {
-    return res.status(400).json({ message: "Missing or invalid search term or user ID" });
+    return res.status(400).json({ message: "Missing or invalid user ID" });
   }
   try {
     const currentUser = await User.findById(userId).populate("friends", "_id");
-    const friendIds = currentUser.friends.map((f)=>f._id.toString());
+    const friendIds = currentUser ? currentUser.friends.map((f) => f._id.toString()) : [];
 
-    const users = await User.find({ username: { $regex: username, $options: "i" },
-    _id:{$ne:userId, $nin:friendIds} })
-      .select("_id username profilePic");
-      // .limit(10); // Limit the number of users shown to 10
+    const query = {
+      _id: { $ne: userId, $nin: friendIds },
+    };
+
+    if (username && username.trim() !== "") {
+      query.username = { $regex: username.trim(), $options: "i" };
+    }
+
+    const users = await User.find(query).select("_id username profilePic");
     res.status(200).json(users);
   } catch (error) {
     res.status(500).json({ error: error.message });
