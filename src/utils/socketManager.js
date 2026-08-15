@@ -27,6 +27,7 @@ const {
   restartTicTacToeGame,
   startTicTacToeGame,
   addTicTacToeComment,
+  addRoomComment,
   swapTicTacToeFirstPlayer,
   submitRPSChoice,
   nextRPSRound,
@@ -64,6 +65,7 @@ const {
 } = require("./togetherRoomManager");
 const users = new Map(); // userId -> socket.id
 const groups = new Map(); // groupId -> { members, admins, chatName }
+const disconnectTimers = new Map(); // userId -> setTimeout ID
 
 const initializeSocket = (io) => {
   io.on("connection", (socket) => {
@@ -71,10 +73,19 @@ const initializeSocket = (io) => {
 
     socket.on("join", (userId) => {
       socket.join(userId);
-      // console.log("userId", userId);
-      // console.log("Id", socket.id);
       users.set(userId, socket.id);
-      // console.log(`✅ User ${userId} joined with socket ID: ${socket.id}`);
+
+      const uIdStr = String(userId);
+      if (disconnectTimers.has(uIdStr)) {
+        clearTimeout(disconnectTimers.get(uIdStr));
+        disconnectTimers.delete(uIdStr);
+      }
+
+      // Re-join active Together socket channel if user was in a room
+      const activeRoom = getRoomForUser(userId);
+      if (activeRoom) {
+        socket.join(`together:${activeRoom.roomId}`);
+      }
     });
 
     // socket.on("markMessagesAsRead", async ({ chatId, userId, friendId }) => {
@@ -236,8 +247,14 @@ const initializeSocket = (io) => {
       }
 
       // Step 3: Fetch updated messages to emit with expiresAt included
-      const updatedMessages = await Message.find({ chatId })
-        .populate("sender", "_id username profilePic");
+      const updatedMessages = await Message.find({
+        chatId,
+        $or: [
+          { expiresAt: null },
+          { expiresAt: { $exists: false } },
+          { expiresAt: { $gt: new Date() } },
+        ],
+      }).populate("sender", "_id username profilePic");
 
       io.to(chatId).emit("messagesReadAck", {
         chatId,
@@ -718,6 +735,34 @@ const initializeSocket = (io) => {
       io.in(roomSocketId).socketsLeave(roomSocketId);
     });
 
+    socket.on("together:declineInvite", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const room = getRoom(roomId);
+      if (!room) return;
+
+      const roomSocketId = `together:${roomId}`;
+
+      // Notify room channel and host directly that the invite was declined and room is closed
+      io.to(roomSocketId).emit("together:closed", { roomId, reason: "invite_declined" });
+      io.emit("together:roomClosed", { roomId });
+
+      if (room.hostId) {
+        const hostSocketId = users.get(room.hostId.toString());
+        if (hostSocketId) {
+          io.to(hostSocketId).emit("together:closed", { roomId, reason: "invite_declined" });
+          io.to(hostSocketId).emit("together:state", null);
+        }
+      }
+
+      // Close the room and clean up on server
+      closeRoom(roomId, room.hostId);
+
+      // Force all sockets to leave the room channel
+      io.in(roomSocketId).socketsLeave(roomSocketId);
+    });
+
     socket.on("together:switchGame", async ({ roomId, gameId }) => {
       const userId = getSocketUserId(socket, users);
       if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
@@ -766,11 +811,44 @@ const initializeSocket = (io) => {
       io.to(roomSocketId).emit("together:state", result.room);
     });
 
-    socket.on("together:tictactoe:comment", async ({ roomId, text }) => {
+    socket.on("together:tictactoe:comment", async ({ roomId, text, username }) => {
       const userId = getSocketUserId(socket, users);
       if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
 
-      const result = addTicTacToeComment(roomId, userId, text);
+      const result = addRoomComment(roomId, userId, text, username);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:game:comment", async ({ roomId, text, username }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = addRoomComment(roomId, userId, text, username);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:activity:comment", async ({ roomId, text, username }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = addRoomComment(roomId, userId, text, username);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:room:comment", async ({ roomId, text, username }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = addRoomComment(roomId, userId, text, username);
       if (result.error) return socket.emit("together:error", { message: result.error });
 
       const roomSocketId = `together:${roomId}`;
@@ -1202,19 +1280,29 @@ const initializeSocket = (io) => {
         }
       }
 
-      // Auto-leave Together room on disconnect
+      // Auto-leave Together room after a 30s grace period for reconnection
       if (disconnectedUserId) {
-        const result = handleTogetherDisconnect(disconnectedUserId);
-        if (result && result.roomId) {
-          const roomSocketId = `together:${result.roomId}`;
-          if (result.closed) {
-            io.to(roomSocketId).emit("together:closed", { roomId: result.roomId, reason: "host_disconnected" });
-            io.in(roomSocketId).socketsLeave(roomSocketId);
-          } else if (result.room) {
-            io.to(roomSocketId).emit("together:left", { userId: disconnectedUserId, room: result.room });
-            io.to(roomSocketId).emit("together:state", result.room);
-          }
+        const uIdStr = String(disconnectedUserId);
+        if (disconnectTimers.has(uIdStr)) {
+          clearTimeout(disconnectTimers.get(uIdStr));
         }
+
+        const timer = setTimeout(() => {
+          disconnectTimers.delete(uIdStr);
+          const result = handleTogetherDisconnect(disconnectedUserId);
+          if (result && result.roomId) {
+            const roomSocketId = `together:${result.roomId}`;
+            if (result.closed) {
+              io.to(roomSocketId).emit("together:closed", { roomId: result.roomId, reason: "host_disconnected" });
+              io.in(roomSocketId).socketsLeave(roomSocketId);
+            } else if (result.room) {
+              io.to(roomSocketId).emit("together:left", { userId: disconnectedUserId, room: result.room });
+              io.to(roomSocketId).emit("together:state", result.room);
+            }
+          }
+        }, 30000); // 30-second grace window
+
+        disconnectTimers.set(uIdStr, timer);
       }
     });
   });
