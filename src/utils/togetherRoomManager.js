@@ -297,15 +297,13 @@ function leaveRoom(roomId, userId) {
     for (const pid of room.participants) {
       userRooms.delete(pid);
     }
-    rooms.delete(roomId);
-    cleanupRoomMedia(roomId).catch((err) => console.error("Error cleaning up room media:", err));
+    destroyRoom(roomId);
     return { room: serializeRoom(room), closed: true };
   }
 
   // If room is empty, clean it up
   if (room.participants.size === 0) {
-    rooms.delete(roomId);
-    cleanupRoomMedia(roomId).catch((err) => console.error("Error cleaning up room media:", err));
+    destroyRoom(roomId);
     return { room: null, closed: true };
   }
 
@@ -319,6 +317,30 @@ function leaveRoom(roomId, userId) {
   }
 
   return { room: serializeRoom(room), closed: false };
+}
+
+/**
+ * Completely purge a room's state, live chats/comments, and any DB records when room is turned off.
+ */
+function destroyRoom(roomId) {
+  const room = rooms.get(roomId);
+  if (room) {
+    if (room.state) {
+      room.state.comments = [];
+      if (room.state.ticTacToe) room.state.ticTacToe.comments = [];
+      if (room.state.rps) room.state.rps.comments = [];
+      if (room.state.connect4) room.state.connect4.comments = [];
+      if (room.state.memoryMatch) room.state.memoryMatch.comments = [];
+      if (room.state.drawing) room.state.drawing.comments = [];
+      if (room.state.quiz) room.state.quiz.comments = [];
+      if (room.state.activity) room.state.activity.comments = [];
+    }
+  }
+
+  rooms.delete(roomId);
+
+  // Clean up all Cloudinary files & MongoDB TogetherMedia records for this roomId
+  cleanupRoomMedia(roomId).catch((err) => console.error("Error cleaning up room media:", err));
 }
 
 /**
@@ -343,8 +365,8 @@ function closeRoom(roomId, requesterId) {
   for (const pid of participants) {
     userRooms.delete(pid);
   }
-  rooms.delete(roomId);
-  cleanupRoomMedia(roomId).catch((err) => console.error("Error cleaning up room media:", err));
+  
+  destroyRoom(roomId);
 
   return { participants };
 }
@@ -1137,36 +1159,59 @@ function startTicTacToeGame(roomId, userId) {
 }
 
 /**
- * Add a comment to Tic-Tac-Toe room game.
+ * Add a comment to any Together room (game, activity, watch, music, quiz).
  */
-function addTicTacToeComment(roomId, userId, text) {
+function addRoomComment(roomId, userId, text, username) {
   const room = rooms.get(roomId);
   if (!room) return { error: "Room not found" };
   if (!room.participants.has(userId)) return { error: "You are not in this room" };
 
-  const game = room.state.ticTacToe || room.state.rps || room.state.connect4 || room.state.memoryMatch || room.state.drawing || room.state.quiz;
-  if (!game) return { error: "Game not found" };
-
   if (!text || typeof text !== "string") return { error: "Invalid comment text" };
-  const trimmed = text.trim().slice(0, 100);
+  const trimmed = text.trim().slice(0, 300);
   if (!trimmed) return { error: "Empty comment" };
 
-  if (!Array.isArray(game.comments)) {
-    game.comments = [];
-  }
+  const senderName = username || (userId === room.hostId ? "Host" : "Partner");
 
-  game.comments.push({
-    id: crypto.randomBytes(4).toString("hex"),
+  const commentObj = {
+    id: crypto.randomBytes(6).toString("hex"),
     senderId: userId,
+    username: senderName,
     text: trimmed,
     timestamp: Date.now(),
-  });
+  };
 
-  if (game.comments.length > 15) {
-    game.comments = game.comments.slice(-15);
+  // 1. Add to active game comments array
+  const activeGame =
+    room.state.ticTacToe ||
+    room.state.rps ||
+    room.state.connect4 ||
+    room.state.memoryMatch ||
+    room.state.drawing ||
+    room.state.quiz;
+
+  if (activeGame) {
+    if (!Array.isArray(activeGame.comments)) activeGame.comments = [];
+    activeGame.comments.push(commentObj);
+    if (activeGame.comments.length > 50) activeGame.comments = activeGame.comments.slice(-50);
   }
 
+  // 2. Add to active activity comments array
+  if (room.state.activity) {
+    if (!Array.isArray(room.state.activity.comments)) room.state.activity.comments = [];
+    room.state.activity.comments.push(commentObj);
+    if (room.state.activity.comments.length > 50) room.state.activity.comments = room.state.activity.comments.slice(-50);
+  }
+
+  // 3. Always add to top-level room comments
+  if (!Array.isArray(room.state.comments)) room.state.comments = [];
+  room.state.comments.push(commentObj);
+  if (room.state.comments.length > 50) room.state.comments = room.state.comments.slice(-50);
+
   return { room: serializeRoom(room) };
+}
+
+function addTicTacToeComment(roomId, userId, text, username) {
+  return addRoomComment(roomId, userId, text, username);
 }
 
 /**
@@ -1509,6 +1554,7 @@ module.exports = {
   restartTicTacToeGame,
   startTicTacToeGame,
   addTicTacToeComment,
+  addRoomComment,
   swapTicTacToeFirstPlayer,
   submitRPSChoice,
   nextRPSRound,
