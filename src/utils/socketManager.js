@@ -53,6 +53,11 @@ const {
   startQuizGame,
   submitCustomQuizQuestion,
   restartQuizGame,
+  startCatchPartnerGame,
+  swapCatchPartnerFirstRole,
+  moveCatchPartnerPlayer,
+  nextCatchPartnerRound,
+  restartCatchPartnerGame,
   submitActivityAnswer,
   nextActivityPrompt,
   selectTruthOrDare,
@@ -72,8 +77,9 @@ const initializeSocket = (io) => {
     // console.log("🟢 New user connected:", socket.id);
 
     socket.on("join", (userId) => {
+      socket.userId = userId;
       socket.join(userId);
-      users.set(userId, socket.id);
+      users.set(String(userId), socket.id);
 
       const uIdStr = String(userId);
       if (disconnectTimers.has(uIdStr)) {
@@ -1135,6 +1141,62 @@ const initializeSocket = (io) => {
       io.to(roomSocketId).emit("together:state", result.room);
     });
 
+    // ─── Catch My Partner Listeners ───
+    socket.on("together:catchpartner:start", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = startCatchPartnerGame(roomId, userId, io);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:catchpartner:swapFirstRole", async ({ roomId, firstCatcherId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = swapCatchPartnerFirstRole(roomId, userId, firstCatcherId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:catchpartner:move", async ({ roomId, position }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = moveCatchPartnerPlayer(roomId, userId, position, io);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:catchpartner:nextRound", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = nextCatchPartnerRound(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
+    socket.on("together:catchpartner:restart", async ({ roomId }) => {
+      const userId = getSocketUserId(socket, users);
+      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+
+      const result = restartCatchPartnerGame(roomId, userId);
+      if (result.error) return socket.emit("together:error", { message: result.error });
+
+      const roomSocketId = `together:${roomId}`;
+      io.to(roomSocketId).emit("together:state", result.room);
+    });
+
     // ─── Couple Activities Listeners ───
     socket.on("together:activity:submitAnswer", async ({ roomId, answer }) => {
       const userId = getSocketUserId(socket, users);
@@ -1237,7 +1299,7 @@ const initializeSocket = (io) => {
 
     socket.on("together:getState", async ({ roomId }) => {
       const userId = getSocketUserId(socket, users);
-      if (!userId) return socket.emit("together:error", { message: "Not authenticated" });
+      if (!userId) return socket.emit("together:state", null);
 
       // If roomId provided, get that room; otherwise get user's current room
       let room;

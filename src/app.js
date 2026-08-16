@@ -37,6 +37,17 @@ app.use(
     credentials: true, // REQUIRED
   })
 );
+// app.use(
+//   cors({
+//     origin: (origin, callback) => {
+//       // Allow local network IP addresses, localhost, or production origin
+//       if (!origin || true) {
+//         return callback(null, true);
+//       }
+//     },
+//     credentials: true, // REQUIRED
+//   })
+// );
 
 // app.use(cors(
 //   {
@@ -144,10 +155,7 @@ app.get("/api/health", (req, res) => {
 //connect MongoDb
 
 mongoose
-  .connect(process.env.MONGO_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
+  .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDb Connected"))
   .catch((error) => console.log("MongoDb Connection Error: ", error));
 

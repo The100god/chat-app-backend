@@ -20,8 +20,18 @@ function generateRoomId() {
  * Returns null if the socket hasn't joined.
  */
 function getSocketUserId(socket, usersMap) {
-  for (const [userId, socketId] of usersMap.entries()) {
-    if (socketId === socket.id) return userId;
+  if (!socket) return null;
+  if (socket.userId) return String(socket.userId);
+  if (socket.handshake && socket.handshake.auth && socket.handshake.auth.userId) {
+    return String(socket.handshake.auth.userId);
+  }
+  if (socket.handshake && socket.handshake.query && socket.handshake.query.userId) {
+    return String(socket.handshake.query.userId);
+  }
+  if (usersMap) {
+    for (const [userId, socketId] of usersMap.entries()) {
+      if (socketId === socket.id) return String(userId);
+    }
   }
   return null;
 }
@@ -167,6 +177,8 @@ function initGameRoomState(room, gameId, hostId) {
       comments: [],
       askerId: p1,
     };
+  } else if (gameId === "catchpartner") {
+    initCatchPartnerRoomState(room, hostId);
   }
 }
 
@@ -267,6 +279,26 @@ function joinRoom(roomId, userId) {
         g.status = "setup";
       }
     }
+    if (room.state.catchPartner) {
+      const g = room.state.catchPartner;
+      if (g.scores[userId] === undefined) g.scores[userId] = 0;
+      if (!g.players[userId]) {
+        const isCatcher = !g.roles.catcher;
+        g.players[userId] = {
+          x: isCatcher ? 100 : 700,
+          y: 300,
+          vx: 0,
+          vy: 0,
+          role: isCatcher ? "catcher" : "runner",
+          isBoosting: false,
+        };
+        if (isCatcher) g.roles.catcher = userId;
+        else if (!g.roles.runner) g.roles.runner = userId;
+      }
+      if (room.participants.size >= 2 && g.status === "waiting") {
+        g.status = "setup";
+      }
+    }
   }
 
   return { room: serializeRoom(room) };
@@ -333,8 +365,14 @@ function destroyRoom(roomId) {
       if (room.state.memoryMatch) room.state.memoryMatch.comments = [];
       if (room.state.drawing) room.state.drawing.comments = [];
       if (room.state.quiz) room.state.quiz.comments = [];
+      if (room.state.catchPartner) room.state.catchPartner.comments = [];
       if (room.state.activity) room.state.activity.comments = [];
     }
+  }
+
+  if (catchPartnerTimers.has(roomId)) {
+    clearInterval(catchPartnerTimers.get(roomId));
+    catchPartnerTimers.delete(roomId);
   }
 
   rooms.delete(roomId);
@@ -1187,7 +1225,8 @@ function addRoomComment(roomId, userId, text, username) {
     room.state.connect4 ||
     room.state.memoryMatch ||
     room.state.drawing ||
-    room.state.quiz;
+    room.state.quiz ||
+    room.state.catchPartner;
 
   if (activeGame) {
     if (!Array.isArray(activeGame.comments)) activeGame.comments = [];
@@ -1580,6 +1619,377 @@ module.exports = {
   startQuizGame,
   submitCustomQuizQuestion,
   restartQuizGame,
+  initActivityRoomState,
+  submitActivityAnswer,
+  nextActivityPrompt,
+  selectTruthOrDare,
+  submitTruthOrDareQuestion,
+  submitTruthOrDareAnswer,
+  switchActivityCategory,
+  switchActivity,
+};
+
+// ─── Catch My Partner Game Handlers ───
+const catchPartnerTimers = new Map();
+
+function initCatchPartnerRoomState(room, hostId) {
+  const pList = Array.from(room.participants || [hostId]);
+  const p1 = pList[0] || hostId;
+  const p2 = pList[1] || null;
+
+  const scores = { [p1]: 0 };
+  if (p2) scores[p2] = 0;
+
+  const players = {
+    [p1]: { x: 100, y: 300, vx: 0, vy: 0, role: "catcher", isBoosting: false },
+  };
+  if (p2) {
+    players[p2] = { x: 700, y: 300, vx: 0, vy: 0, role: "runner", isBoosting: false };
+  }
+
+  const defaultObstacles = [
+    { x: 350, y: 220, w: 100, h: 160, type: "pillar" },
+    { x: 200, y: 100, w: 120, h: 40, type: "wall" },
+    { x: 480, y: 460, w: 120, h: 40, type: "wall" },
+    { x: 120, y: 380, w: 40, h: 120, type: "wall" },
+    { x: 640, y: 100, w: 40, h: 120, type: "wall" },
+  ];
+
+  const defaultPowerUps = [
+    { id: "pu1", x: 400, y: 120, type: "speed" },
+    { id: "pu2", x: 400, y: 480, type: "speed" },
+  ];
+
+  room.state.catchPartner = {
+    status: p2 ? "setup" : "waiting",
+    players,
+    roles: {
+      catcher: p1,
+      runner: p2,
+    },
+    round: 1,
+    maxRounds: 5,
+    timer: 30,
+    scores,
+    winner: null,
+    roundResult: null,
+    obstacles: defaultObstacles,
+    powerUps: defaultPowerUps,
+    comments: [],
+  };
+}
+
+function startCatchPartnerTimer(roomId, io) {
+  if (catchPartnerTimers.has(roomId)) {
+    clearInterval(catchPartnerTimers.get(roomId));
+    catchPartnerTimers.delete(roomId);
+  }
+
+  const intervalId = setInterval(() => {
+    const room = rooms.get(roomId);
+    if (!room || !room.state.catchPartner) {
+      clearInterval(intervalId);
+      catchPartnerTimers.delete(roomId);
+      return;
+    }
+
+    const cp = room.state.catchPartner;
+    if (cp.status !== "playing") {
+      clearInterval(intervalId);
+      catchPartnerTimers.delete(roomId);
+      return;
+    }
+
+    cp.timer -= 1;
+
+    // Timer finished -> Runner wins round!
+    if (cp.timer <= 0) {
+      cp.timer = 0;
+      cp.status = "round_ended";
+      const runnerId = cp.roles.runner;
+      const catcherId = cp.roles.catcher;
+
+      if (runnerId) {
+        cp.scores[runnerId] = (cp.scores[runnerId] || 0) + 1;
+      }
+      cp.roundResult = {
+        winnerId: runnerId,
+        reason: "Runner escaped! Time expired! ⚡",
+      };
+
+      updateSessionStats(room, runnerId, catcherId, false, "catchpartner");
+      clearInterval(intervalId);
+      catchPartnerTimers.delete(roomId);
+    }
+
+    if (io) {
+      io.to(`together:${roomId}`).emit("together:state", serializeRoom(room));
+    }
+  }, 1000);
+
+  catchPartnerTimers.set(roomId, intervalId);
+}
+
+function startCatchPartnerGame(roomId, userId, io) {
+  const room = rooms.get(roomId);
+  if (!room || !room.state.catchPartner) return { error: "Room not found" };
+
+  const cp = room.state.catchPartner;
+  cp.status = "playing";
+  cp.timer = 30;
+  cp.roundResult = null;
+
+  // Reset player positions
+  const catcherId = cp.roles.catcher;
+  const runnerId = cp.roles.runner;
+
+  if (catcherId && cp.players[catcherId]) {
+    cp.players[catcherId].x = 100;
+    cp.players[catcherId].y = 300;
+  }
+  if (runnerId && cp.players[runnerId]) {
+    cp.players[runnerId].x = 700;
+    cp.players[runnerId].y = 300;
+  }
+
+  startCatchPartnerTimer(roomId, io);
+  return { room: serializeRoom(room) };
+}
+
+function swapCatchPartnerFirstRole(roomId, userId, firstCatcherId) {
+  const room = rooms.get(roomId);
+  if (!room || !room.state.catchPartner) return { error: "Room not found" };
+
+  const cp = room.state.catchPartner;
+  const pList = Array.from(room.participants);
+  const otherId = pList.find((id) => id !== firstCatcherId) || null;
+
+  cp.roles.catcher = firstCatcherId;
+  cp.roles.runner = otherId;
+
+  if (cp.players[firstCatcherId]) {
+    cp.players[firstCatcherId].role = "catcher";
+    cp.players[firstCatcherId].x = 100;
+    cp.players[firstCatcherId].y = 300;
+  }
+  if (otherId && cp.players[otherId]) {
+    cp.players[otherId].role = "runner";
+    cp.players[otherId].x = 700;
+    cp.players[otherId].y = 300;
+  }
+
+  return { room: serializeRoom(room) };
+}
+
+function moveCatchPartnerPlayer(roomId, userId, payload, io) {
+  const room = rooms.get(roomId);
+  if (!room || !room.state.catchPartner) return { error: "Room not found" };
+
+  const cp = room.state.catchPartner;
+  if (cp.status !== "playing") return { room: serializeRoom(room) };
+
+  const player = cp.players[userId];
+  if (!player) return { room: serializeRoom(room) };
+
+  const { x, y, isBoosting } = payload || {};
+  if (typeof x !== "number" || typeof y !== "number") return { error: "Invalid coordinates" };
+
+  // Validate maximum position delta step to prevent teleportation cheating
+  const maxDelta = isBoosting ? 250 : 150;
+  const dx = x - player.x;
+  const dy = y - player.y;
+  const distMoved = Math.hypot(dx, dy);
+
+  let newX = player.x;
+  let newY = player.y;
+
+  if (distMoved <= maxDelta) {
+    newX = x;
+    newY = y;
+  } else {
+    // Clamp movement step towards target
+    const angle = Math.atan2(dy, dx);
+    newX = player.x + Math.cos(angle) * maxDelta;
+    newY = player.y + Math.sin(angle) * maxDelta;
+  }
+
+  // Bounds check (Arena: 800 x 600)
+  const radius = 18;
+  newX = Math.max(radius, Math.min(800 - radius, newX));
+  newY = Math.max(radius, Math.min(600 - radius, newY));
+
+  // Obstacle collisions check (push out if colliding with rectangle obstacles)
+  for (const obs of cp.obstacles) {
+    const closestX = Math.max(obs.x, Math.min(newX, obs.x + obs.w));
+    const closestY = Math.max(obs.y, Math.min(newY, obs.y + obs.h));
+    const distToObsX = newX - closestX;
+    const distToObsY = newY - closestY;
+    const distanceToObs = Math.hypot(distToObsX, distToObsY);
+
+    if (distanceToObs < radius) {
+      const overlap = radius - distanceToObs;
+      if (distanceToObs > 0) {
+        newX += (distToObsX / distanceToObs) * overlap;
+        newY += (distToObsY / distanceToObs) * overlap;
+      } else {
+        newX += radius;
+      }
+    }
+  }
+
+  player.x = newX;
+  player.y = newY;
+  player.isBoosting = !!isBoosting;
+
+  // Check PowerUp pickups
+  if (cp.powerUps && cp.powerUps.length > 0) {
+    cp.powerUps = cp.powerUps.filter((pu) => {
+      const pDist = Math.hypot(pu.x - newX, pu.y - newY);
+      if (pDist < 28) {
+        player.speedBoostTime = Date.now() + 3000;
+        return false;
+      }
+      return true;
+    });
+  }
+
+  // Check Catch Collision between Catcher and Runner
+  const catcherId = cp.roles.catcher;
+  const runnerId = cp.roles.runner;
+
+  if (catcherId && runnerId && cp.players[catcherId] && cp.players[runnerId]) {
+    const pCatcher = cp.players[catcherId];
+    const pRunner = cp.players[runnerId];
+    const catchDist = Math.hypot(pCatcher.x - pRunner.x, pCatcher.y - pRunner.y);
+
+    if (catchDist <= radius * 2) {
+      // Catcher caught Runner!
+      cp.status = "round_ended";
+      cp.scores[catcherId] = (cp.scores[catcherId] || 0) + 1;
+      cp.roundResult = {
+        winnerId: catcherId,
+        reason: "Catcher tagged the Runner! 🎯",
+      };
+
+      updateSessionStats(room, catcherId, runnerId, false, "catchpartner");
+
+      if (catchPartnerTimers.has(roomId)) {
+        clearInterval(catchPartnerTimers.get(roomId));
+        catchPartnerTimers.delete(roomId);
+      }
+    }
+  }
+
+  return { room: serializeRoom(room) };
+}
+
+function nextCatchPartnerRound(roomId, userId) {
+  const room = rooms.get(roomId);
+  if (!room || !room.state.catchPartner) return { error: "Room not found" };
+
+  const cp = room.state.catchPartner;
+  cp.round += 1;
+
+  if (cp.round > cp.maxRounds) {
+    // Determine overall match winner
+    const p1 = cp.roles.catcher;
+    const p2 = cp.roles.runner;
+    const s1 = (p1 && cp.scores[p1]) || 0;
+    const s2 = (p2 && cp.scores[p2]) || 0;
+
+    cp.status = "finished";
+    if (s1 > s2) cp.winner = p1;
+    else if (s2 > s1) cp.winner = p2;
+    else cp.winner = null; // tie
+  } else {
+    // Swap roles for next round
+    const prevCatcher = cp.roles.catcher;
+    const prevRunner = cp.roles.runner;
+
+    cp.roles.catcher = prevRunner;
+    cp.roles.runner = prevCatcher;
+
+    if (prevRunner && cp.players[prevRunner]) {
+      cp.players[prevRunner].role = "catcher";
+      cp.players[prevRunner].x = 100;
+      cp.players[prevRunner].y = 300;
+    }
+    if (prevCatcher && cp.players[prevCatcher]) {
+      cp.players[prevCatcher].role = "runner";
+      cp.players[prevCatcher].x = 700;
+      cp.players[prevCatcher].y = 300;
+    }
+
+    cp.status = "setup";
+    cp.roundResult = null;
+    cp.timer = 30;
+  }
+
+  return { room: serializeRoom(room) };
+}
+
+function restartCatchPartnerGame(roomId, userId) {
+  const room = rooms.get(roomId);
+  if (!room || !room.state.catchPartner) return { error: "Room not found" };
+
+  if (catchPartnerTimers.has(roomId)) {
+    clearInterval(catchPartnerTimers.get(roomId));
+    catchPartnerTimers.delete(roomId);
+  }
+
+  initCatchPartnerRoomState(room, room.hostId);
+  return { room: serializeRoom(room) };
+}
+
+module.exports = {
+  getSocketUserId,
+  validateFriendship,
+  createRoom,
+  joinRoom,
+  leaveRoom,
+  closeRoom,
+  switchGame,
+  updateRoomState,
+  getRoom,
+  getRoomForUser,
+  getRejoinableRoomsForUser,
+  handleDisconnect,
+  makeTicTacToeMove,
+  restartTicTacToeGame,
+  startTicTacToeGame,
+  addTicTacToeComment,
+  addRoomComment,
+  swapTicTacToeFirstPlayer,
+  submitRPSChoice,
+  nextRPSRound,
+  restartRPSGame,
+  makeConnect4Move,
+  startConnect4Game,
+  swapConnect4FirstPlayer,
+  restartConnect4Game,
+  flipMemoryCard,
+  resetMemoryFlippedCards,
+  swapMemoryFirstPlayer,
+  startMemoryGame,
+  restartMemoryGame,
+  addDrawingElement,
+  clearDrawingBoard,
+  switchDrawingMode,
+  submitSecretDrawing,
+  resetSecretMindMatch,
+  submitMindMatchChoice,
+  resetMindMatch,
+  submitQuizAnswer,
+  swapQuizFirstPlayer,
+  startQuizGame,
+  submitCustomQuizQuestion,
+  restartQuizGame,
+  initCatchPartnerRoomState,
+  startCatchPartnerGame,
+  swapCatchPartnerFirstRole,
+  moveCatchPartnerPlayer,
+  nextCatchPartnerRound,
+  restartCatchPartnerGame,
   initActivityRoomState,
   submitActivityAnswer,
   nextActivityPrompt,
