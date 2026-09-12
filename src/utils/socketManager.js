@@ -69,29 +69,101 @@ const {
   updateMusicState,
 } = require("./togetherRoomManager");
 const users = new Map(); // userId -> socket.id
+const userSockets = new Map(); // userId -> Set<socket.id>
+const onlineUsers = new Set(); // Set of online userIds
 const groups = new Map(); // groupId -> { members, admins, chatName }
 const disconnectTimers = new Map(); // userId -> setTimeout ID
 
 const initializeSocket = (io) => {
   io.on("connection", (socket) => {
-    // console.log("🟢 New user connected:", socket.id);
+    // Auto-register user if userId was provided in handshake auth or query
+    const handshakeUserId = socket.handshake.auth?.userId || socket.handshake.query?.userId;
+    if (handshakeUserId) {
+      const hIdStr = String(handshakeUserId);
+      socket.userId = hIdStr;
+      socket.join(hIdStr);
+      users.set(hIdStr, socket.id);
+      onlineUsers.add(hIdStr);
+
+      if (!userSockets.has(hIdStr)) {
+        userSockets.set(hIdStr, new Set());
+      }
+      userSockets.get(hIdStr).add(socket.id);
+
+      if (disconnectTimers.has(hIdStr)) {
+        clearTimeout(disconnectTimers.get(hIdStr));
+        disconnectTimers.delete(hIdStr);
+      }
+
+      Group.find({ groupMember: hIdStr })
+        .select("_id")
+        .then((userGroups) => {
+          userGroups.forEach((g) => {
+            socket.join(g._id.toString());
+          });
+        })
+        .catch((err) => console.error("Error auto-joining user groups on handshake:", err));
+
+      io.emit("getOnlineUsers", Array.from(onlineUsers));
+      io.emit("onlineUsers", Array.from(onlineUsers));
+      io.emit("userOnline", hIdStr);
+      io.emit("userOnline", { userId: hIdStr });
+    }
 
     socket.on("join", (userId) => {
-      socket.userId = userId;
-      socket.join(userId);
-      users.set(String(userId), socket.id);
-
+      if (!userId) return;
       const uIdStr = String(userId);
+      socket.join(uIdStr);
+
+      // If socket already has a userId and joins another room/chatId
+      if (socket.userId && socket.userId !== uIdStr) {
+        return;
+      }
+
+      socket.userId = uIdStr;
+      users.set(uIdStr, socket.id);
+      onlineUsers.add(uIdStr);
+
+      if (!userSockets.has(uIdStr)) {
+        userSockets.set(uIdStr, new Set());
+      }
+      userSockets.get(uIdStr).add(socket.id);
+
       if (disconnectTimers.has(uIdStr)) {
         clearTimeout(disconnectTimers.get(uIdStr));
         disconnectTimers.delete(uIdStr);
       }
+
+      Group.find({ groupMember: uIdStr })
+        .select("_id")
+        .then((userGroups) => {
+          userGroups.forEach((g) => {
+            socket.join(g._id.toString());
+          });
+        })
+        .catch((err) => console.error("Error auto-joining user groups on join:", err));
 
       // Re-join active Together socket channel if user was in a room
       const activeRoom = getRoomForUser(userId);
       if (activeRoom) {
         socket.join(`together:${activeRoom.roomId}`);
       }
+
+      // Broadcast online status to all connected clients
+      io.emit("getOnlineUsers", Array.from(onlineUsers));
+      io.emit("onlineUsers", Array.from(onlineUsers));
+      io.emit("userOnline", uIdStr);
+      io.emit("userOnline", { userId: uIdStr });
+    });
+
+    socket.on("joinChat", (chatId) => {
+      if (chatId) {
+        socket.join(String(chatId));
+      }
+    });
+
+    socket.on("getOnlineUsers", () => {
+      socket.emit("getOnlineUsers", Array.from(onlineUsers));
     });
 
     // socket.on("markMessagesAsRead", async ({ chatId, userId, friendId }) => {
@@ -262,13 +334,21 @@ const initializeSocket = (io) => {
         ],
       }).populate("sender", "_id username profilePic");
 
-      io.to(chatId).emit("messagesReadAck", {
-        chatId,
-        readerId,
+      const ackPayload = {
+        chatId: chatId ? chatId.toString() : undefined,
+        readerId: readerId ? readerId.toString() : undefined,
+        senderId: senderId ? senderId.toString() : undefined,
         updatedMessages,
-      });
+      };
 
+      if (chatId) {
+        io.to(chatId.toString()).emit("messagesReadAck", ackPayload);
+      }
+      if (senderId) {
+        io.to(senderId.toString()).emit("messagesReadAck", ackPayload);
+      }
       if (readerId) {
+        io.to(readerId.toString()).emit("messagesReadAck", ackPayload);
         io.to(readerId.toString()).emit("update_unseen_count", {
           friendId: senderId,
           count: 0,
@@ -340,6 +420,12 @@ const initializeSocket = (io) => {
       if (bulkOps.length > 0) {
         await Message.bulkWrite(bulkOps);
       }
+
+      // Notify sender that their messages were read
+      io.to(senderId.toString()).emit("messagesReadAck", {
+        readerId: receiverId ? receiverId.toString() : undefined,
+        senderId: senderId ? senderId.toString() : undefined,
+      });
 
       io.to(receiverId.toString()).emit("unreadMessageCountUpdated", {
         friendId: senderId,
@@ -572,29 +658,104 @@ const initializeSocket = (io) => {
     );
 
     socket.on("groupMessagesRead", async ({ groupId, readerId }) => {
-      await GroupMessage.updateMany({
-        groupId,
-        seenBy: {
-          $ne: readerId,
-        },
-      },
+      if (!groupId || !readerId) return;
+
+      const group = await Group.findById(groupId);
+      if (!group) return;
+
+      const totalMembers = (group.groupMember || []).map((m) => m.toString());
+
+      // Step 1: Add readerId to seenBy of all group messages in this group
+      await GroupMessage.updateMany(
         {
-          $addToSet: {
-            seenBy: readerId
-
-          }
+          groupId,
+          seenBy: { $ne: readerId },
+        },
+        {
+          $addToSet: { seenBy: readerId },
         }
-
       );
 
-      const updatedMessages = await GroupMessage.find({ groupId })
-        .populate("sender", "_id username profilePic")
+      // Step 2: Check for active messages where ALL group members have now seen the message
+      const activeMessages = await GroupMessage.find({
+        groupId,
+        $or: [
+          { expiresAt: null },
+          { expiresAt: { $exists: false } },
+          { expiresAt: { $gt: new Date() } },
+        ],
+      });
+
+      const now = Date.now();
+      const bulkOps = [];
+
+      for (const msg of activeMessages) {
+        const seenIds = (msg.seenBy || []).map((id) =>
+          typeof id === "object" ? id._id?.toString() || id.toString() : id.toString()
+        );
+        if (!seenIds.includes(readerId.toString())) {
+          seenIds.push(readerId.toString());
+        }
+
+        // Have all members in the group seen this message?
+        const allSeen = totalMembers.length > 0 && totalMembers.every((mId) => seenIds.includes(mId));
+
+        // If all members have seen the message and expiresAt is not yet set:
+        // Set 1-hour delete timer (3600000 ms)
+        if (allSeen && !msg.expiresAt) {
+          const oneHourLater = new Date(now + 60 * 60 * 1000);
+          bulkOps.push({
+            updateOne: {
+              filter: { _id: msg._id },
+              update: { $set: { expiresAt: oneHourLater } },
+            },
+          });
+        }
+      }
+
+      if (bulkOps.length > 0) {
+        await GroupMessage.bulkWrite(bulkOps);
+      }
+
+      // Step 3: Remove any messages whose 1-hour expiration has already elapsed
+      const expiredMessages = await GroupMessage.find({
+        groupId,
+        expiresAt: { $ne: null, $lte: new Date() },
+      });
+      if (expiredMessages.length > 0) {
+        for (const exp of expiredMessages) {
+          io.to(groupId.toString()).emit("messageDeleted", {
+            messageId: exp._id.toString(),
+            groupId: groupId.toString(),
+          });
+        }
+        await GroupMessage.deleteMany({
+          _id: { $in: expiredMessages.map((m) => m._id) },
+        });
+      }
+
+      // Step 4: Fetch updated messages populated with sender and seenBy
+      const updatedMessages = await GroupMessage.find({
+        groupId,
+        $or: [
+          { expiresAt: null },
+          { expiresAt: { $exists: false } },
+          { expiresAt: { $gt: new Date() } },
+        ],
+      })
+        .populate("sender", "_id username profilePic groupProfilePic groupName")
         .populate("seenBy", "_id username profilePic");
 
-      // console.log("updatedMessages", updatedMessages)
-      io.to(groupId).emit("groupSeenUpdate", {
-        groupId, messages: updatedMessages
-      })
+      io.to(groupId.toString()).emit("groupSeenUpdate", {
+        groupId: groupId.toString(),
+        messages: updatedMessages,
+      });
+
+      // Reset group unread count for reader
+      io.to(readerId.toString()).emit("groupUnreadCountUpdated", {
+        groupId: groupId.toString(),
+        count: 0,
+      });
     });
 
     socket.on("addToGroup", ({ groupId, adminId, newMemberId }) => {
@@ -1333,18 +1494,40 @@ const initializeSocket = (io) => {
     // ═══════════════════════════════════════════════════
 
     socket.on("disconnect", () => {
-      let disconnectedUserId = null;
-      for (let [key, value] of users.entries()) {
-        if (value === socket.id) {
-          disconnectedUserId = key;
-          users.delete(key);
-          break;
+      let disconnectedUserId = socket.userId;
+      if (!disconnectedUserId) {
+        for (let [key, value] of users.entries()) {
+          if (value === socket.id) {
+            disconnectedUserId = key;
+            break;
+          }
         }
       }
 
-      // Auto-leave Together room after a 30s grace period for reconnection
       if (disconnectedUserId) {
         const uIdStr = String(disconnectedUserId);
+        const sSet = userSockets.get(uIdStr);
+        if (sSet) {
+          sSet.delete(socket.id);
+          if (sSet.size === 0) {
+            userSockets.delete(uIdStr);
+            users.delete(uIdStr);
+            onlineUsers.delete(uIdStr);
+            io.emit("getOnlineUsers", Array.from(onlineUsers));
+            io.emit("onlineUsers", Array.from(onlineUsers));
+            io.emit("userOffline", uIdStr);
+            io.emit("userOffline", { userId: uIdStr });
+          }
+        } else {
+          users.delete(uIdStr);
+          onlineUsers.delete(uIdStr);
+          io.emit("getOnlineUsers", Array.from(onlineUsers));
+          io.emit("onlineUsers", Array.from(onlineUsers));
+          io.emit("userOffline", uIdStr);
+          io.emit("userOffline", { userId: uIdStr });
+        }
+
+        // Auto-leave Together room after a 30s grace period for reconnection
         if (disconnectTimers.has(uIdStr)) {
           clearTimeout(disconnectTimers.get(uIdStr));
         }

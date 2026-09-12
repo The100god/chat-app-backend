@@ -33,8 +33,26 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(
   cors({
-    origin: process.env.CLIENT_URL,
-    credentials: true, // REQUIRED
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps, Expo Go, curl, Postman)
+      if (!origin) return callback(null, true);
+
+      // Allow matching CLIENT_URL if defined
+      if (process.env.CLIENT_URL && origin === process.env.CLIENT_URL) {
+        return callback(null, true);
+      }
+
+      // Allow any localhost, 10.x.x.x, 192.168.x.x IP addresses, or Expo origins
+      if (
+        /^http:\/\/(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$/.test(origin) ||
+        origin.startsWith('exp://')
+      ) {
+        return callback(null, true);
+      }
+
+      callback(null, true);
+    },
+    credentials: true,
   })
 );
 // app.use(

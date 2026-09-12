@@ -120,7 +120,7 @@ function initGameRoomState(room, gameId, hostId) {
       winner: null,
       winningLine: null,
       isDraw: false,
-      status: p2 ? "setup" : "waiting",
+      status: p2 ? "playing" : "waiting",
       comments: [],
     };
   } else if (gameId === "rps") {
@@ -141,7 +141,7 @@ function initGameRoomState(room, gameId, hostId) {
       winner: null,
       winningLine: null,
       isDraw: false,
-      status: p2 ? "setup" : "waiting",
+      status: p2 ? "playing" : "waiting",
       comments: [],
     };
   } else if (gameId === "memory") {
@@ -254,7 +254,7 @@ function joinRoom(roomId, userId) {
     if (room.state.ticTacToe) {
       const g = room.state.ticTacToe;
       if (!g.players.O && userId !== g.players.X) g.players.O = userId;
-      if (g.players.X && g.players.O && g.status === "waiting") g.status = "setup";
+      if (g.players.X && g.players.O) g.status = "playing";
     }
     if (room.state.rps) {
       const g = room.state.rps;
@@ -264,7 +264,7 @@ function joinRoom(roomId, userId) {
     if (room.state.connect4) {
       const g = room.state.connect4;
       if (!g.players.Y && userId !== g.players.R) g.players.Y = userId;
-      if (g.players.R && g.players.Y && g.status === "waiting") g.status = "setup";
+      if (g.players.R && g.players.Y) g.status = "playing";
     }
     if (room.state.memoryMatch) {
       const g = room.state.memoryMatch;
@@ -525,9 +525,22 @@ function makeTicTacToeMove(roomId, userId, cellIndex) {
   const room = rooms.get(roomId);
   if (!room) return { error: "Room not found" };
   if (!room.participants.has(userId)) return { error: "You are not in this room" };
-  if (room.type !== "game" || !room.state.ticTacToe) return { error: "Not a Tic-Tac-Toe room" };
-
   const game = room.state.ticTacToe;
+
+  // Check if both players exist
+  if (!game.players.X || !game.players.O) {
+    return { error: "Waiting for partner to join room" };
+  }
+
+  // Auto-activate to playing if in setup or waiting state when move is made
+  if (game.status === "setup" || game.status === "waiting") {
+    game.status = "playing";
+  }
+
+  if (game.status === "finished") {
+    return { error: "Game is finished. Tap Rematch to play again" };
+  }
+
   if (game.status !== "playing") return { error: "Game is not in active play state" };
 
   // Determine player symbol
@@ -722,6 +735,20 @@ function makeConnect4Move(roomId, userId, colIndex) {
   if (!room || !room.state.connect4) return { error: "Room not found" };
   const c4 = room.state.connect4;
 
+  // Check if both players exist
+  if (!c4.players.R || !c4.players.Y) {
+    return { error: "Waiting for partner to join room" };
+  }
+
+  // Auto-activate to playing if in setup or waiting state when move is made
+  if (c4.status === "setup" || c4.status === "waiting") {
+    c4.status = "playing";
+  }
+
+  if (c4.status === "finished") {
+    return { error: "Game is finished. Tap New Game to play again" };
+  }
+
   if (c4.status !== "playing") return { error: "Game not active" };
   const symbol = userId === c4.players.R ? "R" : userId === c4.players.Y ? "Y" : null;
   if (!symbol || c4.currentTurn !== symbol) return { error: "Not your turn" };
@@ -809,7 +836,7 @@ function restartConnect4Game(roomId, userId) {
   c4.winningLine = null;
   c4.isDraw = false;
   c4.currentTurn = "R";
-  c4.status = c4.players.R && c4.players.Y ? "setup" : "waiting";
+  c4.status = c4.players.R && c4.players.Y ? "playing" : "waiting";
   return { room: serializeRoom(room) };
 }
 
@@ -1173,7 +1200,7 @@ function restartTicTacToeGame(roomId, userId) {
   game.winningLine = null;
   game.isDraw = false;
   game.currentTurn = "X";
-  game.status = game.players.X && game.players.O ? "setup" : "waiting";
+  game.status = game.players.X && game.players.O ? "playing" : "waiting";
 
   return { room: serializeRoom(room) };
 }

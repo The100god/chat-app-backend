@@ -16,8 +16,7 @@ exports.sendMessages = async (req, res) => {
       // console.log("base64Data", base64Data)
       const uploaded = await cloudinary.uploader.upload(base64Data, {
         folder: "gappo_chat_app", // Cloudinary folder name
-        allowed_formats: ["jpg", "png", "jpeg", "gif", "mp4", "webm"],
-        resource_type: "auto", // supports image & video
+        resource_type: "auto", // supports image, video & audio
       });
       // console.log("uploaded", uploaded)
       mediaUrls.push(uploaded.secure_url);
@@ -163,6 +162,13 @@ exports.markMessage = async (req, res) => {
     let result = null;
     if (bulkOps.length > 0) {
       result = await Message.bulkWrite(bulkOps);
+    }
+
+    if (req.io && senderId) {
+      req.io.to(senderId.toString()).emit("messagesReadAck", {
+        readerId: receiverId ? receiverId.toString() : undefined,
+        senderId: senderId.toString(),
+      });
     }
 
     res

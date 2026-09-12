@@ -68,9 +68,29 @@ const GetAllGroups = async (req, res) => {
     })
       .populate("groupMember", "username profilePic about email")
       .populate("admins", "username profilePic about email")
-      .populate("superAdmin", "username profilePic about email");
+      .populate("superAdmin", "username profilePic about email")
+      .lean();
 
-    return res.status(200).json(allGroups);
+    const groupsWithUnread = await Promise.all(
+      allGroups.map(async (group) => {
+        const unreadCount = await GroupMessage.countDocuments({
+          groupId: group._id,
+          seenBy: { $ne: userId },
+          deletedFor: { $ne: userId },
+          $or: [
+            { expiresAt: null },
+            { expiresAt: { $exists: false } },
+            { expiresAt: { $gt: new Date() } },
+          ],
+        });
+        return {
+          ...group,
+          unreadCount,
+        };
+      })
+    );
+
+    return res.status(200).json(groupsWithUnread);
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
@@ -104,22 +124,55 @@ const SendGroupMessageToDb = async (req, res) => {
     });
 
     const saveMessage = await newMessage.save();
-    // console.log("groupsaveMessage", saveMessage);
-    // const populateMessage = await saveMessage
-    //   .populate("sender", "_id groupProfilePic groupName")
-    //   .populate("senderId", "_id username profilePic")
     const populateMessage = await GroupMessage.findById(saveMessage._id)
       .populate("sender", "_id username profilePic")
       .populate("seenBy", "_id username profilePic");
-    // console.log("grouppopMessage", populateMessage);
 
-    req.io.to(groupId).emit("newGroupMessage", populateMessage);
+    // Fetch the group to find all member IDs
+    const group = await Group.findById(groupId);
+    const targetRooms = [groupId.toString()];
+    if (group && group.groupMember) {
+      group.groupMember.forEach((mId) => {
+        targetRooms.push(mId.toString());
+      });
+    }
+
+    // Broadcast new group message to group room AND all member personal rooms
+    if (req.io) {
+      req.io.to(targetRooms).emit("newGroupMessage", populateMessage);
+
+      // Compute and emit updated unreadCount for each other member
+      if (group && group.groupMember) {
+        const otherMembers = group.groupMember.filter(
+          (mId) => mId.toString() !== senderId.toString()
+        );
+
+        otherMembers.forEach(async (memberId) => {
+          try {
+            const count = await GroupMessage.countDocuments({
+              groupId,
+              seenBy: { $ne: memberId },
+              deletedFor: { $ne: memberId },
+              $or: [
+                { expiresAt: null },
+                { expiresAt: { $exists: false } },
+                { expiresAt: { $gt: new Date() } },
+              ],
+            });
+            req.io.to(memberId.toString()).emit("groupUnreadCountUpdated", {
+              groupId: groupId.toString(),
+              count,
+            });
+          } catch (err) {
+            console.error("Error updating unread count for member:", err);
+          }
+        });
+      }
+    }
 
     // Group Push Notification Trigger
     try {
-      const group = await Group.findById(groupId);
       if (group) {
-        // Find other members
         const otherMembers = group.groupMember.filter(
           (mId) => mId.toString() !== senderId.toString()
         );
@@ -154,27 +207,26 @@ const GetGroupMessages = async (req, res) => {
     const { userId } = req.query;
     const query = {
       groupId: req.params.groupId,
+      $or: [
+        { expiresAt: null },
+        { expiresAt: { $exists: false } },
+        { expiresAt: { $gt: new Date() } },
+      ],
     };
 
     if (userId) {
       query.deletedFor = { $ne: userId };
     }
 
-    const message = await GroupMessage.find(query).populate("sender", "_id groupProfilePic groupName");
-    // console.log("group message", message);
+    const message = await GroupMessage.find(query)
+      .populate("sender", "_id username profilePic groupProfilePic groupName")
+      .populate("seenBy", "_id username profilePic");
     return res.status(200).json(message);
   } catch (error) {
     return res.status(500).json({
       message: "Error fetching group message.",
     });
   }
-};
-
-module.exports = {
-  CreateGroup,
-  GetAllGroups,
-  SendGroupMessageToDb,
-  GetGroupMessages,
 };
 
 const GetGroupDetails = async (req, res) => {

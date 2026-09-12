@@ -35,10 +35,15 @@ const GroupMessageSchema = new mongoose.Schema({
             ref: "User",
         }
     ],
+    expiresAt: {
+        type: Date,
+        default: null,
+    },
 },
 {timestamps:true}
 );
 
 GroupMessageSchema.index({ groupId: 1 });
+GroupMessageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
-module.exports = mongoose.model("GroupMessage", GroupMessageSchema)
+module.exports = mongoose.model("GroupMessage", GroupMessageSchema);
