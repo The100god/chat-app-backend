@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Chat = require("../models/Chat");
 const Message = require("../models/Message");
 const GroupMessage = require("../models/GroupMessage");
@@ -47,39 +48,71 @@ exports.sendMessages = async (req, res) => {
       "_id username profilePic"
     );
 
-    // Send the message to the receiver in real-time using Socket.io
-    req.io.to(chatId.toString()).emit("newMessage", fullMessage);
+    // Determine target receiver ID safely
+    let targetReceiverId = receiverId;
+    if (targetReceiverId && typeof targetReceiverId === "object") {
+      targetReceiverId = targetReceiverId._id || targetReceiverId.friendId || targetReceiverId.id;
+    }
+    if (!targetReceiverId && chatId) {
+      const chat = await Chat.findById(chatId);
+      if (chat && Array.isArray(chat.members)) {
+        const other = chat.members.find((m) => m.toString() !== senderId.toString());
+        if (other) targetReceiverId = other.toString();
+      }
+    }
+
+    // Send the message to the chat room AND the receiver's personal socket room
+    const targetRooms = [chatId.toString()];
+    if (targetReceiverId) {
+      targetRooms.push(targetReceiverId.toString());
+    }
+    req.io.to(targetRooms).emit("newMessage", fullMessage);
 
     // Real-time unread count calculation & emission for receiver
     try {
-      const unreadCount = await Message.countDocuments({
-        sender: senderId,
-        receiver: receiverId,
-        isRead: false,
-        deletedFor: { $ne: receiverId },
-        $or: [
-          { expiresAt: null },
-          { expiresAt: { $exists: false } },
-          { expiresAt: { $gt: new Date() } },
-        ],
-      });
+      if (targetReceiverId) {
+        const sObjectId = mongoose.Types.ObjectId.isValid(senderId)
+          ? new mongoose.Types.ObjectId(senderId)
+          : senderId;
+        const rObjectId = mongoose.Types.ObjectId.isValid(targetReceiverId)
+          ? new mongoose.Types.ObjectId(targetReceiverId)
+          : targetReceiverId;
 
-      if (receiverId) {
-        req.io.to(receiverId.toString()).emit("unreadMessageCountUpdated", {
-          friendId: senderId,
+        const unreadCount = await Message.countDocuments({
+          sender: sObjectId,
+          receiver: rObjectId,
+          isRead: false,
+          deletedFor: { $nin: [rObjectId, targetReceiverId.toString()] },
+          $or: [
+            { expiresAt: null },
+            { expiresAt: { $exists: false } },
+            { expiresAt: { $gt: new Date() } },
+          ],
+        });
+
+        const rIdStr = targetReceiverId.toString();
+        const sIdStr = senderId.toString();
+
+        req.io.to(rIdStr).emit("messageNotification", {
+          message: fullMessage,
+          chatId: chatId,
+          sender: fullMessage.sender,
+        });
+        req.io.to(rIdStr).emit("unreadMessageCountUpdated", {
+          friendId: sIdStr,
           count: unreadCount,
         });
-        req.io.to(receiverId.toString()).emit("update_unseen_count", {
-          friendId: senderId,
+        req.io.to(rIdStr).emit("update_unseen_count", {
+          friendId: sIdStr,
           count: unreadCount,
         });
 
         // Trigger background push notification
-        if (receiverId.toString() !== senderId.toString()) {
-           const totalUnread = await Message.countDocuments({
-            receiver: receiverId,
+        if (rIdStr !== sIdStr) {
+          const totalUnread = await Message.countDocuments({
+            receiver: rObjectId,
             isRead: false,
-            deletedFor: { $ne: receiverId },
+            deletedFor: { $nin: [rObjectId, rIdStr] },
             $or: [
               { expiresAt: null },
               { expiresAt: { $exists: false } },
@@ -87,7 +120,7 @@ exports.sendMessages = async (req, res) => {
             ],
           });
 
-          sendPushNotification(receiverId, {
+          sendPushNotification(targetReceiverId, {
             title: "Chugli",
             body: "New message received!",
             icon: "/icon-192.png",

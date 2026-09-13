@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Group = require("../models/Group");
 const GroupMessage = require("../models/GroupMessage");
 const cloudinary = require("../utils/cloudinary");
@@ -63,8 +64,19 @@ const GetAllGroups = async (req, res) => {
     if (!userId)
       return res.status(400).json({ message: "User ID is required." });
 
+    const uObjectId = mongoose.Types.ObjectId.isValid(userId)
+      ? new mongoose.Types.ObjectId(userId)
+      : userId;
+
     const allGroups = await Group.find({
-      groupMember: userId,
+      $or: [
+        { groupMember: uObjectId },
+        { groupMember: userId },
+        { admins: uObjectId },
+        { admins: userId },
+        { superAdmin: uObjectId },
+        { superAdmin: userId },
+      ],
     })
       .populate("groupMember", "username profilePic about email")
       .populate("admins", "username profilePic about email")
@@ -75,8 +87,8 @@ const GetAllGroups = async (req, res) => {
       allGroups.map(async (group) => {
         const unreadCount = await GroupMessage.countDocuments({
           groupId: group._id,
-          seenBy: { $ne: userId },
-          deletedFor: { $ne: userId },
+          seenBy: { $nin: [uObjectId, userId] },
+          deletedFor: { $nin: [uObjectId, userId] },
           $or: [
             { expiresAt: null },
             { expiresAt: { $exists: false } },
@@ -128,53 +140,77 @@ const SendGroupMessageToDb = async (req, res) => {
       .populate("sender", "_id username profilePic")
       .populate("seenBy", "_id username profilePic");
 
-    // Fetch the group to find all member IDs
+    // Fetch the group to find all member IDs (including admins & superAdmin)
     const group = await Group.findById(groupId);
     const targetRooms = [groupId.toString()];
-    if (group && group.groupMember) {
-      group.groupMember.forEach((mId) => {
-        targetRooms.push(mId.toString());
-      });
+    const allMemberIds = new Set();
+    if (group) {
+      if (Array.isArray(group.groupMember)) {
+        group.groupMember.forEach((mId) => allMemberIds.add(mId.toString()));
+      }
+      if (Array.isArray(group.admins)) {
+        group.admins.forEach((mId) => allMemberIds.add(mId.toString()));
+      }
+      if (group.superAdmin) {
+        allMemberIds.add(group.superAdmin.toString());
+      }
     }
+    allMemberIds.forEach((mId) => targetRooms.push(mId));
 
     // Broadcast new group message to group room AND all member personal rooms
     if (req.io) {
-      req.io.to(targetRooms).emit("newGroupMessage", populateMessage);
+      const messagePayload = {
+        ...populateMessage.toObject(),
+        groupName: group?.groupName || "Group",
+        groupProfilePic: group?.groupProfilePic || null,
+        groupId: groupId.toString(),
+      };
+      req.io.to(targetRooms).emit("newGroupMessage", messagePayload);
+      req.io.to(targetRooms).emit("groupMessageNotification", {
+        message: messagePayload,
+        groupId: groupId.toString(),
+        groupName: group?.groupName || "Group",
+        sender: populateMessage.sender,
+      });
 
       // Compute and emit updated unreadCount for each other member
-      if (group && group.groupMember) {
-        const otherMembers = group.groupMember.filter(
-          (mId) => mId.toString() !== senderId.toString()
-        );
+      const senderIdStr = String(senderId);
+      const otherMembers = Array.from(allMemberIds).filter(
+        (mId) => mId !== senderIdStr
+      );
 
-        otherMembers.forEach(async (memberId) => {
-          try {
-            const count = await GroupMessage.countDocuments({
-              groupId,
-              seenBy: { $ne: memberId },
-              deletedFor: { $ne: memberId },
-              $or: [
-                { expiresAt: null },
-                { expiresAt: { $exists: false } },
-                { expiresAt: { $gt: new Date() } },
-              ],
-            });
-            req.io.to(memberId.toString()).emit("groupUnreadCountUpdated", {
-              groupId: groupId.toString(),
-              count,
-            });
-          } catch (err) {
-            console.error("Error updating unread count for member:", err);
-          }
-        });
+      for (const memberId of otherMembers) {
+        try {
+          const mObjectId = mongoose.Types.ObjectId.isValid(memberId)
+            ? new mongoose.Types.ObjectId(memberId)
+            : memberId;
+
+          const count = await GroupMessage.countDocuments({
+            groupId,
+            seenBy: { $nin: [mObjectId, memberId] },
+            deletedFor: { $nin: [mObjectId, memberId] },
+            $or: [
+              { expiresAt: null },
+              { expiresAt: { $exists: false } },
+              { expiresAt: { $gt: new Date() } },
+            ],
+          });
+          req.io.to(memberId).emit("groupUnreadCountUpdated", {
+            groupId: groupId.toString(),
+            count,
+          });
+        } catch (err) {
+          console.error("Error updating unread count for member:", err);
+        }
       }
     }
 
     // Group Push Notification Trigger
     try {
       if (group) {
-        const otherMembers = group.groupMember.filter(
-          (mId) => mId.toString() !== senderId.toString()
+        const senderIdStr = String(senderId);
+        const otherMembers = Array.from(allMemberIds).filter(
+          (mId) => mId !== senderIdStr
         );
 
         otherMembers.forEach((memberId) => {

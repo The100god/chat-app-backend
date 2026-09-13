@@ -1,4 +1,5 @@
 // backend/utils/socketManager.js
+const mongoose = require("mongoose");
 const {
   handleFriendRequestSocket,
 } = require("../controllers/friendController");
@@ -194,19 +195,60 @@ const initializeSocket = (io) => {
 
     socket.on("getFriendListWithUnseen", async ({ userId }) => {
       try {
+        if (!userId) return;
+        const uObjectId = mongoose.Types.ObjectId.isValid(userId)
+          ? new mongoose.Types.ObjectId(userId)
+          : userId;
+
         const receiver = await User.findById(userId).populate(
           "friends",
           "username profilePic"
         );
         if (!receiver) return;
 
+        const friendMap = new Map();
+        if (Array.isArray(receiver.friends)) {
+          receiver.friends.forEach((friend) => {
+            if (friend && friend._id) {
+              friendMap.set(friend._id.toString(), friend);
+            }
+          });
+        }
+
+        // Also check if there are 1-on-1 chats with other users
+        try {
+          const chats = await Chat.find({
+            members: uObjectId,
+            isGroupChat: { $ne: true },
+          }).populate("members", "username profilePic");
+
+          for (const chat of chats) {
+            if (Array.isArray(chat.members)) {
+              for (const m of chat.members) {
+                if (m && m._id && m._id.toString() !== userId.toString()) {
+                  if (!friendMap.has(m._id.toString())) {
+                    friendMap.set(m._id.toString(), m);
+                  }
+                }
+              }
+            }
+          }
+        } catch (chatErr) {
+          console.error("Error populating chats in getFriendListWithUnseen:", chatErr);
+        }
+
+        const allFriendsList = Array.from(friendMap.values());
         const friendDetails = await Promise.all(
-          receiver.friends.map(async (friend) => {
+          allFriendsList.map(async (friend) => {
+            const fObjectId = mongoose.Types.ObjectId.isValid(friend._id)
+              ? new mongoose.Types.ObjectId(friend._id)
+              : friend._id;
+
             const unreadMessagesCount = await Message.countDocuments({
-              sender: friend._id,
-              receiver: userId,
+              sender: fObjectId,
+              receiver: uObjectId,
               isRead: false,
-              deletedFor: { $ne: userId },
+              deletedFor: { $nin: [uObjectId, userId.toString()] },
               $or: [
                 { expiresAt: null },
                 { expiresAt: { $exists: false } },
@@ -214,7 +256,7 @@ const initializeSocket = (io) => {
               ],
             });
             return {
-              friendId: friend._id,
+              friendId: friend._id.toString(),
               username: friend.username,
               profilePic: friend.profilePic,
               unreadMessagesCount,
@@ -364,14 +406,39 @@ const initializeSocket = (io) => {
       "sendMessage",
       async ({ chatId, senderId, content, receiverId }) => {
         try {
-          const targetReceiverId = receiverId || (typeof receiverId === 'object' ? receiverId._id : null);
-          if (!targetReceiverId || !senderId) return;
+          let sId = typeof senderId === 'object' ? senderId?._id?.toString() : senderId?.toString();
+          let targetReceiverId = receiverId
+            ? (typeof receiverId === 'object' ? receiverId?._id?.toString() : receiverId?.toString())
+            : null;
+
+          if (!targetReceiverId && chatId) {
+            const chat = await Chat.findById(chatId);
+            if (chat && chat.members) {
+              const otherMember = chat.members.find(
+                (m) => m.toString() !== sId
+              );
+              if (otherMember) {
+                targetReceiverId = otherMember.toString();
+              }
+            }
+          }
+
+          if (!targetReceiverId || !sId) return;
+
+          let sObjectId, rObjectId;
+          try {
+            sObjectId = new mongoose.Types.ObjectId(sId);
+            rObjectId = new mongoose.Types.ObjectId(targetReceiverId);
+          } catch (e) {
+            sObjectId = sId;
+            rObjectId = targetReceiverId;
+          }
 
           const unreadCount = await Message.countDocuments({
-            sender: senderId,
-            receiver: targetReceiverId,
+            sender: { $in: [sObjectId, sId] },
+            receiver: { $in: [rObjectId, targetReceiverId] },
             isRead: false,
-            deletedFor: { $ne: targetReceiverId },
+            deletedFor: { $nin: [rObjectId, targetReceiverId] },
             $or: [
               { expiresAt: null },
               { expiresAt: { $exists: false } },
@@ -379,27 +446,38 @@ const initializeSocket = (io) => {
             ],
           });
 
-          io.to(targetReceiverId.toString()).emit("unreadMessageCountUpdated", {
-            friendId: senderId,
+          io.to(targetReceiverId).emit("unreadMessageCountUpdated", {
+            friendId: sId,
             count: unreadCount,
           });
-          io.to(targetReceiverId.toString()).emit("update_unseen_count", {
-            friendId: senderId,
+          io.to(targetReceiverId).emit("update_unseen_count", {
+            friendId: sId,
             count: unreadCount,
           });
         } catch (error) {
-          console.error("Error sending message:", error);
+          console.error("Error in socket sendMessage unread count:", error);
         }
       }
     );
 
     // read unseen message — also set expiresAt for disappearing messages
     socket.on("mark_messages_read", async ({ senderId, receiverId }) => {
-      if (!senderId || !receiverId) return;
+      const sId = typeof senderId === 'object' ? senderId?._id?.toString() : senderId?.toString();
+      const rId = typeof receiverId === 'object' ? receiverId?._id?.toString() : receiverId?.toString();
+      if (!sId || !rId) return;
+
+      let sObjectId, rObjectId;
+      try {
+        sObjectId = new mongoose.Types.ObjectId(sId);
+        rObjectId = new mongoose.Types.ObjectId(rId);
+      } catch (e) {
+        sObjectId = sId;
+        rObjectId = rId;
+      }
 
       const unreadMessages = await Message.find({
-        sender: senderId,
-        receiver: receiverId,
+        sender: { $in: [sObjectId, sId] },
+        receiver: { $in: [rObjectId, rId] },
         isRead: false,
       });
 
@@ -422,17 +500,17 @@ const initializeSocket = (io) => {
       }
 
       // Notify sender that their messages were read
-      io.to(senderId.toString()).emit("messagesReadAck", {
-        readerId: receiverId ? receiverId.toString() : undefined,
-        senderId: senderId ? senderId.toString() : undefined,
+      io.to(sId).emit("messagesReadAck", {
+        readerId: rId,
+        senderId: sId,
       });
 
-      io.to(receiverId.toString()).emit("unreadMessageCountUpdated", {
-        friendId: senderId,
+      io.to(rId).emit("unreadMessageCountUpdated", {
+        friendId: sId,
         count: 0,
       });
-      io.to(receiverId.toString()).emit("update_unseen_count", {
-        friendId: senderId,
+      io.to(rId).emit("update_unseen_count", {
+        friendId: sId,
         count: 0,
       });
     });
@@ -663,16 +741,27 @@ const initializeSocket = (io) => {
       const group = await Group.findById(groupId);
       if (!group) return;
 
-      const totalMembers = (group.groupMember || []).map((m) => m.toString());
+      const allMembersSet = new Set();
+      (group.groupMember || []).forEach((m) => allMembersSet.add(m.toString()));
+      (group.admins || []).forEach((m) => allMembersSet.add(m.toString()));
+      if (group.superAdmin) allMembersSet.add(group.superAdmin.toString());
+      const totalMembers = Array.from(allMembersSet);
+
+      let rObjectId;
+      try {
+        rObjectId = new mongoose.Types.ObjectId(readerId);
+      } catch (e) {
+        rObjectId = readerId;
+      }
 
       // Step 1: Add readerId to seenBy of all group messages in this group
       await GroupMessage.updateMany(
         {
           groupId,
-          seenBy: { $ne: readerId },
+          seenBy: { $nin: [rObjectId, readerId.toString()] },
         },
         {
-          $addToSet: { seenBy: readerId },
+          $addToSet: { seenBy: rObjectId },
         }
       );
 
