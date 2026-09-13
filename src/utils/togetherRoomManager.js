@@ -120,7 +120,7 @@ function initGameRoomState(room, gameId, hostId) {
       winner: null,
       winningLine: null,
       isDraw: false,
-      status: p2 ? "playing" : "waiting",
+      status: p2 ? "setup" : "waiting",
       comments: [],
     };
   } else if (gameId === "rps") {
@@ -141,7 +141,7 @@ function initGameRoomState(room, gameId, hostId) {
       winner: null,
       winningLine: null,
       isDraw: false,
-      status: p2 ? "playing" : "waiting",
+      status: p2 ? "setup" : "waiting",
       comments: [],
     };
   } else if (gameId === "memory") {
@@ -155,7 +155,7 @@ function initGameRoomState(room, gameId, hostId) {
       flippedCards: [],
       winner: null,
       isDraw: false,
-      status: p2 ? "playing" : "waiting",
+      status: p2 ? "setup" : "waiting",
       comments: [],
     };
   } else if (gameId === "drawing") {
@@ -254,7 +254,12 @@ function joinRoom(roomId, userId) {
     if (room.state.ticTacToe) {
       const g = room.state.ticTacToe;
       if (!g.players.O && userId !== g.players.X) g.players.O = userId;
-      if (g.players.X && g.players.O) g.status = "playing";
+      if (g.players.X && g.players.O) {
+        const boardClean = !g.board || g.board.every((cell) => cell === null);
+        if (boardClean && g.status !== "finished") {
+          g.status = "setup";
+        }
+      }
     }
     if (room.state.rps) {
       const g = room.state.rps;
@@ -264,13 +269,20 @@ function joinRoom(roomId, userId) {
     if (room.state.connect4) {
       const g = room.state.connect4;
       if (!g.players.Y && userId !== g.players.R) g.players.Y = userId;
-      if (g.players.R && g.players.Y) g.status = "playing";
+      if (g.players.R && g.players.Y) {
+        const boardClean = !g.board || g.board.every((row) => row.every((c) => c === null));
+        if (boardClean && g.status !== "finished") {
+          g.status = "setup";
+        }
+      }
     }
     if (room.state.memoryMatch) {
       const g = room.state.memoryMatch;
       if (!g.players.includes(userId)) g.players.push(userId);
       if (g.scores[userId] === undefined) g.scores[userId] = 0;
-      if (g.players.length >= 2 && g.status === "waiting") g.status = "playing";
+      if (g.players.length >= 2 && g.status === "waiting") {
+        g.status = "setup";
+      }
     }
     if (room.state.quiz) {
       const g = room.state.quiz;
@@ -836,7 +848,7 @@ function restartConnect4Game(roomId, userId) {
   c4.winningLine = null;
   c4.isDraw = false;
   c4.currentTurn = "R";
-  c4.status = c4.players.R && c4.players.Y ? "playing" : "waiting";
+  c4.status = c4.players.R && c4.players.Y ? "setup" : "waiting";
   return { room: serializeRoom(room) };
 }
 
@@ -1200,7 +1212,7 @@ function restartTicTacToeGame(roomId, userId) {
   game.winningLine = null;
   game.isDraw = false;
   game.currentTurn = "X";
-  game.status = game.players.X && game.players.O ? "playing" : "waiting";
+  game.status = game.players.X && game.players.O ? "setup" : "waiting";
 
   return { room: serializeRoom(room) };
 }

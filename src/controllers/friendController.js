@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const Message = require("../models/Message");
 const User = require("../models/User");
+const Chat = require("../models/Chat");
 
 // send Friend request
 
@@ -188,6 +189,8 @@ const getFriends = async (req, res) => {
       return res.status(400).json({ error: "Invalid or missing User ID" });
     }
 
+    const uObjectId = new mongoose.Types.ObjectId(userId);
+
     // Find user and populate friends
     const user = await User.findById(userId).populate(
       "friends",
@@ -198,28 +201,64 @@ const getFriends = async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    if (!user.friends || user.friends.length === 0) {
-      return res.status(200).json([]); // Return empty array if no friends
+    const friendMap = new Map();
+    if (Array.isArray(user.friends)) {
+      user.friends.forEach((friend) => {
+        if (friend && friend._id) {
+          friendMap.set(friend._id.toString(), friend);
+        }
+      });
+    }
+
+    // Also include other participants from 1-to-1 chats so direct chat contacts always receive unread counts
+    try {
+      const chats = await Chat.find({
+        members: uObjectId,
+        isGroupChat: { $ne: true },
+      }).populate("members", "username profilePic");
+
+      for (const chat of chats) {
+        if (Array.isArray(chat.members)) {
+          for (const m of chat.members) {
+            if (m && m._id && m._id.toString() !== userId.toString()) {
+              if (!friendMap.has(m._id.toString())) {
+                friendMap.set(m._id.toString(), m);
+              }
+            }
+          }
+        }
+      }
+    } catch (chatErr) {
+      console.error("Error populating chats in getFriends:", chatErr);
+    }
+
+    const allFriendsList = Array.from(friendMap.values());
+    if (allFriendsList.length === 0) {
+      return res.status(200).json([]);
     }
 
     // Get all friends details with unread message count
     const friendDetails = await Promise.all(
-      user.friends.map(async (friend) => {
+      allFriendsList.map(async (friend) => {
         try {
+          const fObjectId = mongoose.Types.ObjectId.isValid(friend._id)
+            ? new mongoose.Types.ObjectId(friend._id)
+            : friend._id;
+
           const unreadMessagesCount = await Message.countDocuments({
-            sender: friend._id,
-            receiver: userId, // Check messages where friend is sender and user is receiver
-            isRead: false, // Only count unread messages
-            deletedFor: { $ne: userId },
+            sender: fObjectId,
+            receiver: uObjectId,
+            isRead: false,
+            deletedFor: { $nin: [uObjectId, userId.toString()] },
             $or: [
               { expiresAt: null },
               { expiresAt: { $exists: false } },
               { expiresAt: { $gt: new Date() } },
             ],
           });
-// console.log("unreadMessagesCount", unreadMessagesCount)
+
           return {
-            friendId: friend._id,
+            friendId: friend._id.toString(),
             username: friend.username,
             profilePic: friend.profilePic,
             unreadMessagesCount,
@@ -227,10 +266,10 @@ const getFriends = async (req, res) => {
         } catch (messageError) {
           console.error("Error fetching unread messages:", messageError);
           return {
-            friendId: friend._id,
+            friendId: friend._id.toString(),
             username: friend.username,
             profilePic: friend.profilePic,
-            unreadMessagesCount: 0, // If error, return 0 unread messages
+            unreadMessagesCount: 0,
           };
         }
       })
