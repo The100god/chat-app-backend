@@ -11,6 +11,8 @@ const chatRoutes = require("./routes/chatRoutes");
 const messageRoutes = require("./routes/messageRoutes");
 const userRoutes = require("./routes/userRoute");
 const groupRoutes = require("./routes/groupRoutes");
+const adminRoutes = require("./routes/adminRoutes");
+const { getPublicConfig } = require("./controllers/adminController");
 const { initializeSocket } = require("./utils/socketManager");
 const cookieParser = require("cookie-parser");
 const helmet = require("helmet");
@@ -31,6 +33,14 @@ app.disable("x-powered-by");
 // middleware
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Handle JSON parse errors gracefully
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
+    return res.status(400).json({ success: false, message: "Invalid JSON format in request body" });
+  }
+  next(err);
+});
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -159,6 +169,8 @@ app.use("/api/chat", chatRoutes);
 app.use("/api/message", messageRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/groups", groupRoutes);
+app.use("/api/admin", adminRoutes);
+app.get("/api/config/public", getPublicConfig);
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
