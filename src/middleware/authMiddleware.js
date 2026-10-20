@@ -53,6 +53,13 @@ const protect = async (req, res, next) => {
       });
     }
 
+    if (user.isSuspended) {
+      return res.status(403).json({
+        message: user.suspendedReason ? `Account suspended: ${user.suspendedReason}` : "Your account has been suspended by an administrator.",
+        code: "ACCOUNT_SUSPENDED",
+      });
+    }
+
     req.user = user;
     next();
   } catch (error) {

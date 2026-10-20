@@ -48,7 +48,7 @@ const getFriendRequests = async (req, res) => {
     
     const user = await User.findById(userId).populate(
       "friendRequests",
-      "username email"
+      "username name email profilePic"
     );
     res.status(200).json(user.friendRequests);
   } catch (error) {
@@ -121,7 +121,7 @@ const handleFriendRequestSocket = async ({ senderId, receiverId, status,io, user
   const getFriendDetails = async (userId) => {
     const user = await User.findById(userId).populate(
       "friends",
-      "username profilePic"
+      "username name profilePic"
     );
     const friendDetails = await Promise.all(
       user.friends.map(async (friend) => {
@@ -139,6 +139,7 @@ const handleFriendRequestSocket = async ({ senderId, receiverId, status,io, user
         return {
           friendId: friend._id,
           username: friend.username,
+          name: friend.name,
           profilePic: friend.profilePic,
           unreadMessagesCount,
         };
@@ -194,7 +195,7 @@ const getFriends = async (req, res) => {
     // Find user and populate friends
     const user = await User.findById(userId).populate(
       "friends",
-      "username profilePic"
+      "username name profilePic"
     );
 
     if (!user) {
@@ -215,7 +216,7 @@ const getFriends = async (req, res) => {
       const chats = await Chat.find({
         members: uObjectId,
         isGroupChat: { $ne: true },
-      }).populate("members", "username profilePic");
+      }).populate("members", "username name profilePic");
 
       for (const chat of chats) {
         if (Array.isArray(chat.members)) {
@@ -260,6 +261,7 @@ const getFriends = async (req, res) => {
           return {
             friendId: friend._id.toString(),
             username: friend.username,
+            name: friend.name,
             profilePic: friend.profilePic,
             unreadMessagesCount,
           };
@@ -268,6 +270,7 @@ const getFriends = async (req, res) => {
           return {
             friendId: friend._id.toString(),
             username: friend.username,
+            name: friend.name,
             profilePic: friend.profilePic,
             unreadMessagesCount: 0,
           };
@@ -285,7 +288,7 @@ const getFriends = async (req, res) => {
 const fetchFriendDetails = async (userId) => {
   const user = await User.findById(userId).populate(
     "friends",
-    "username profilePic"
+    "username name profilePic"
   );
   if (!user) return [];
   const friendDetails = await Promise.all(
@@ -304,6 +307,7 @@ const fetchFriendDetails = async (userId) => {
       return {
         friendId: friend._id,
         username: friend.username,
+        name: friend.name,
         profilePic: friend.profilePic,
         unreadMessagesCount,
       };

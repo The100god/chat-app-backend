@@ -78,9 +78,9 @@ const GetAllGroups = async (req, res) => {
         { superAdmin: userId },
       ],
     })
-      .populate("groupMember", "username profilePic about email")
-      .populate("admins", "username profilePic about email")
-      .populate("superAdmin", "username profilePic about email")
+      .populate("groupMember", "username name profilePic about email")
+      .populate("admins", "username name profilePic about email")
+      .populate("superAdmin", "username name profilePic about email")
       .lean();
 
     const groupsWithUnread = await Promise.all(
@@ -137,8 +137,8 @@ const SendGroupMessageToDb = async (req, res) => {
 
     const saveMessage = await newMessage.save();
     const populateMessage = await GroupMessage.findById(saveMessage._id)
-      .populate("sender", "_id username profilePic")
-      .populate("seenBy", "_id username profilePic");
+      .populate("sender", "_id username name profilePic")
+      .populate("seenBy", "_id username name profilePic");
 
     // Fetch the group to find all member IDs (including admins & superAdmin)
     const group = await Group.findById(groupId);
@@ -255,8 +255,8 @@ const GetGroupMessages = async (req, res) => {
     }
 
     const message = await GroupMessage.find(query)
-      .populate("sender", "_id username profilePic groupProfilePic groupName")
-      .populate("seenBy", "_id username profilePic");
+      .populate("sender", "_id username name profilePic groupProfilePic groupName")
+      .populate("seenBy", "_id username name profilePic");
     return res.status(200).json(message);
   } catch (error) {
     return res.status(500).json({
@@ -269,9 +269,9 @@ const GetGroupDetails = async (req, res) => {
   try {
     const { groupId } = req.params;
     const group = await Group.findById(groupId)
-      .populate("groupMember", "username profilePic about email")
-      .populate("admins", "username profilePic about email")
-      .populate("superAdmin", "username profilePic about email");
+      .populate("groupMember", "username name profilePic about email")
+      .populate("admins", "username name profilePic about email")
+      .populate("superAdmin", "username name profilePic about email");
 
     if (!group) {
       return res.status(404).json({ message: "Group not found." });
@@ -310,9 +310,9 @@ const UpdateGroupInfo = async (req, res) => {
     await group.save();
 
     const updatedGroup = await Group.findById(groupId)
-      .populate("groupMember", "username profilePic about email")
-      .populate("admins", "username profilePic about email")
-      .populate("superAdmin", "username profilePic about email");
+      .populate("groupMember", "username name profilePic about email")
+      .populate("admins", "username name profilePic about email")
+      .populate("superAdmin", "username name profilePic about email");
 
     req.io.to(groupId).emit("groupUpdated", updatedGroup);
 
@@ -344,9 +344,9 @@ const AddGroupMembers = async (req, res) => {
     await group.save();
 
     const updatedGroup = await Group.findById(groupId)
-      .populate("groupMember", "username profilePic about email")
-      .populate("admins", "username profilePic about email")
-      .populate("superAdmin", "username profilePic about email");
+      .populate("groupMember", "username name profilePic about email")
+      .populate("admins", "username name profilePic about email")
+      .populate("superAdmin", "username name profilePic about email");
 
     req.io.to(groupId).emit("groupUpdated", updatedGroup);
 
@@ -383,9 +383,9 @@ const RemoveGroupMember = async (req, res) => {
     await group.save();
 
     const updatedGroup = await Group.findById(groupId)
-      .populate("groupMember", "username profilePic about email")
-      .populate("admins", "username profilePic about email")
-      .populate("superAdmin", "username profilePic about email");
+      .populate("groupMember", "username name profilePic about email")
+      .populate("admins", "username name profilePic about email")
+      .populate("superAdmin", "username name profilePic about email");
 
     req.io.to(groupId).emit("groupUpdated", updatedGroup);
     req.io.to(memberId).emit("removedFromGroup", { groupId });
@@ -416,9 +416,9 @@ const PromoteToAdmin = async (req, res) => {
     await group.save();
 
     const updatedGroup = await Group.findById(groupId)
-      .populate("groupMember", "username profilePic about email")
-      .populate("admins", "username profilePic about email")
-      .populate("superAdmin", "username profilePic about email");
+      .populate("groupMember", "username name profilePic about email")
+      .populate("admins", "username name profilePic about email")
+      .populate("superAdmin", "username name profilePic about email");
 
     req.io.to(groupId).emit("groupUpdated", updatedGroup);
 
@@ -450,9 +450,9 @@ const DemoteFromAdmin = async (req, res) => {
     await group.save();
 
     const updatedGroup = await Group.findById(groupId)
-      .populate("groupMember", "username profilePic about email")
-      .populate("admins", "username profilePic about email")
-      .populate("superAdmin", "username profilePic about email");
+      .populate("groupMember", "username name profilePic about email")
+      .populate("admins", "username name profilePic about email")
+      .populate("superAdmin", "username name profilePic about email");
 
     req.io.to(groupId).emit("groupUpdated", updatedGroup);
 
@@ -491,9 +491,9 @@ const LeaveGroup = async (req, res) => {
     await group.save();
 
     const updatedGroup = await Group.findById(groupId)
-      .populate("groupMember", "username profilePic about email")
-      .populate("admins", "username profilePic about email")
-      .populate("superAdmin", "username profilePic about email");
+      .populate("groupMember", "username name profilePic about email")
+      .populate("admins", "username name profilePic about email")
+      .populate("superAdmin", "username name profilePic about email");
 
     req.io.to(groupId).emit("groupUpdated", updatedGroup);
     req.io.to(requesterId).emit("leftGroup", { groupId });

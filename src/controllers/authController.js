@@ -48,7 +48,7 @@ const refreshTokenHandler = async (req, res) => {
 
 const googleAuth = async (req, res) => {
   try {
-    const { token } = req.body; // token from frontend (Google)
+    const { token, username: desiredUsername } = req.body; // token from frontend (Google)
     if (!token) return res.status(400).json({ message: "No token provided" });
 
     // 1️⃣ Verify Google token
@@ -65,12 +65,15 @@ const googleAuth = async (req, res) => {
     }
 
     // 3️⃣ Check if the user already exists
-    let user = await User.findOne({ email });
+    let user = await User.findOne({ email: email.toLowerCase().trim() });
 
-    // If user exists but not verified, mark verified
+    // If user exists: login directly
     if (user) {
       if (!user.isVerified) {
         user.isVerified = true;
+      }
+      if (!user.name && name) {
+        user.name = name.trim();
       }
 
       // If old user does not have self-friend, fix it
@@ -80,10 +83,38 @@ const googleAuth = async (req, res) => {
 
       await user.save();
     } else {
-      // Create new user only if none exists
+      // Brand new Google user: Check if a unique username was supplied
+      if (!desiredUsername || !desiredUsername.trim()) {
+        // Do NOT auto-generate a username. Prompt the client for a unique username popup.
+        return res.status(200).json({
+          requiresUsername: true,
+          email,
+          name: name || "User",
+          picture,
+          googleToken: token,
+          message: "Please choose your permanent username to complete registration.",
+        });
+      }
+
+      // Validate the chosen permanent username
+      const cleanUsername = desiredUsername.toLowerCase().trim();
+      const usernameRegex = /^[a-z0-9_]{3,30}$/;
+      if (!usernameRegex.test(cleanUsername)) {
+        return res.status(400).json({
+          message: "Username must be 3-30 characters long and contain only letters, numbers, and underscores.",
+        });
+      }
+
+      const usernameExists = await User.findOne({ username: cleanUsername });
+      if (usernameExists) {
+        return res.status(400).json({ message: "Username is already taken. Please choose another." });
+      }
+
+      // Create new user with chosen username & Google display name
       user = await User.create({
-        username: name,
-        email,
+        username: cleanUsername,
+        name: (req.body.name || name || cleanUsername).trim(),
+        email: email.toLowerCase().trim(),
         password: "GOOGLE_AUTH_USER",
         profilePic: picture,
         isVerified: true,
@@ -94,18 +125,7 @@ const googleAuth = async (req, res) => {
       await user.save();
     }
 
-    // if (!user) {
-    //   // 4️⃣ Create new user if not exist
-    //   user = await User.create({
-    //     username: name,
-    //     email,
-    //     password: "GOOGLE_AUTH_USER", // dummy password
-    //     profilePic: picture,
-    //     isVerified: true,
-    //   });
-    // }
-
-    // 5️⃣ Generate JWT for our app
+    // 4️⃣ Generate JWT for our app
     const appToken = createToken(user._id);
     const refreshToken = generateRefreshToken(user._id);
     res.cookie("refreshToken", refreshToken, {
@@ -119,7 +139,14 @@ const googleAuth = async (req, res) => {
       message: "Google authentication successful",
       token: appToken,
       userId: user._id,
-      user,
+      user: {
+        _id: user._id,
+        username: user.username,
+        name: user.name,
+        email: user.email,
+        profilePic: user.profilePic,
+        about: user.about,
+      },
     });
   } catch (error) {
     console.error("Google Auth Error:", error);
@@ -128,7 +155,7 @@ const googleAuth = async (req, res) => {
 };
 
 const signup = async (req, res) => {
-  const { username, email, password } = req.body;
+  const { username, name, email, password } = req.body;
 
   try {
     // 1️⃣ Validate email format
@@ -137,22 +164,40 @@ const signup = async (req, res) => {
       return res.status(400).json({ message: "Please enter a valid email address" });
     }
 
-    const emailExists = await User.findOne({ email });
+    const emailExists = await User.findOne({ email: email.toLowerCase().trim() });
     if (emailExists) {
       return res.status(400).json({ message: "Email is already registered" });
     }
 
-    const usernameExists = await User.findOne({
-      username: { $regex: new RegExp(`^${username.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')}$`, "i") },
-    });
-    if (usernameExists) {
-      return res.status(400).json({ message: "Username is already taken" });
+    // 2️⃣ Validate username format & uniqueness
+    if (!username || !username.trim()) {
+      return res.status(400).json({ message: "Username is required" });
     }
 
-    // 2️⃣ Create verified user directly
+    const cleanUsername = username.toLowerCase().trim();
+    const usernameRegex = /^[a-z0-9_]{3,30}$/;
+    if (!usernameRegex.test(cleanUsername)) {
+      return res.status(400).json({
+        message: "Username must be 3-30 characters long and contain only letters, numbers, and underscores.",
+      });
+    }
+
+    const usernameExists = await User.findOne({ username: cleanUsername });
+    if (usernameExists) {
+      return res.status(400).json({ message: "Username is already taken. Please choose another." });
+    }
+
+    // 3️⃣ Validate display name
+    const displayName = (name && name.trim()) ? name.trim() : cleanUsername;
+    if (displayName.length > 50) {
+      return res.status(400).json({ message: "Display name cannot exceed 50 characters" });
+    }
+
+    // 4️⃣ Create verified user
     const user = await User.create({
-      username,
-      email,
+      username: cleanUsername,
+      name: displayName,
+      email: email.toLowerCase().trim(),
       password,
       isVerified: true,
     });
@@ -161,35 +206,7 @@ const signup = async (req, res) => {
     user.friends = [user._id];
     await user.save();
 
-    /*
-    // 📧 EMAIL VERIFICATION (COMMENTED OUT FOR DIRECT ENTRY BY SIGNUP)
-    const verifyToken = jwt.sign(
-      { username, email, password },
-      process.env.JWT_SECRET,
-      { expiresIn: "1h" }
-    );
-
-    const verifyLink = `${process.env.BASE_URL}/api/auth/verify-email/${verifyToken}`;
-    sendEmail({
-      to: email,
-      subject: "Verify your Chugli account ✉️",
-      html: `
-        <div style="font-family:sans-serif; text-align:center;">
-          <h2>Hi ${username},</h2>
-          <p>Thanks for signing up for <b>Chugli Chat App 💬</b>.</p>
-          <p>Please verify your email to activate your account:</p>
-          <a href="${verifyLink}" style="background-color:#1d4ed8;color:white;padding:10px 18px;border-radius:8px;text-decoration:none;">
-            Verify My Email
-          </a>
-          <p style="margin-top:10px;">This link expires in 24 hours.</p>
-        </div>
-      `,
-    }).catch((err) => {
-      console.error("Signup verification email error:", err);
-    });
-    */
-
-    // 3️⃣ Generate JWT for direct app entry
+    // 5️⃣ Generate JWT for direct app entry
     const token = createToken(user._id);
     const refreshToken = generateRefreshToken(user._id);
     res.cookie("refreshToken", refreshToken, {
@@ -203,7 +220,14 @@ const signup = async (req, res) => {
       message: "User registered successfully!",
       token,
       userId: user._id,
-      user,
+      user: {
+        _id: user._id,
+        username: user.username,
+        name: user.name,
+        email: user.email,
+        profilePic: user.profilePic,
+        about: user.about,
+      },
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -314,19 +338,72 @@ const verifyEmail = async (req, res) => {
   }
 };
 
+// 🔍 CHECK USERNAME AVAILABILITY & VALIDITY
+const checkUsername = async (req, res) => {
+  try {
+    const rawUsername = req.query.username || req.body.username;
+    if (!rawUsername || !rawUsername.trim()) {
+      return res.status(400).json({ available: false, message: "Username is required." });
+    }
+
+    const cleanUsername = rawUsername.toLowerCase().trim();
+    const usernameRegex = /^[a-z0-9_]{3,30}$/;
+    if (!usernameRegex.test(cleanUsername)) {
+      return res.status(400).json({
+        available: false,
+        message: "Username must be 3-30 characters long and contain only lowercase letters, numbers, and underscores.",
+      });
+    }
+
+    const existing = await User.findOne({ username: cleanUsername });
+    if (existing) {
+      return res.status(200).json({
+        available: false,
+        message: "Username is already taken.",
+      });
+    }
+
+    return res.status(200).json({
+      available: true,
+      message: "Username is available.",
+      username: cleanUsername,
+    });
+  } catch (error) {
+    console.error("Check username error:", error);
+    return res.status(500).json({ message: "Server error checking username." });
+  }
+};
+
 // ✅ LOGIN ROUTE
 const login = async (req, res) => {
   const { username, password } = req.body;
 
   try {
+    if (!username || !password) {
+      return res.status(400).json({ message: "Username/Email and password are required" });
+    }
+
+    const loginIdentifier = username.trim();
+    const escapedIdentifier = loginIdentifier.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+
     const user = await User.findOne({
-      username: { $regex: new RegExp(`^${username.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')}$`, "i") },
+      $or: [
+        { username: { $regex: new RegExp(`^${escapedIdentifier}$`, "i") } },
+        { email: loginIdentifier.toLowerCase() },
+      ],
     });
     if (!user) {
       return res.status(400).json({ message: "Invalid User Details" });
     }
 
     // 🧩 ADD THIS CHECK HERE — before password match
+    if (user.isSuspended) {
+      return res.status(403).json({
+        message: user.suspendedReason ? `Account suspended: ${user.suspendedReason}` : "Your account has been suspended by an administrator.",
+        code: "ACCOUNT_SUSPENDED",
+      });
+    }
+
     if (!user.isVerified) {
       return res.status(403).json({
         message: "Please verify your email before logging in.",
@@ -352,12 +429,20 @@ const login = async (req, res) => {
       sameSite: "none", // required for Netlify ↔ Render
       maxAge: 30 * 24 * 60 * 60 * 1000,
     });
-    //  jwt.sign({id: user._id}, process.env.JWT_SECRET, {
-    //     expiresIn:"30d"
-    // })
-    res
-      .status(200)
-      .json({ message: "Login Successfully", token, userId: user._id });
+
+    res.status(200).json({
+      message: "Login Successfully",
+      token,
+      userId: user._id,
+      user: {
+        _id: user._id,
+        username: user.username,
+        name: user.name,
+        email: user.email,
+        profilePic: user.profilePic,
+        about: user.about,
+      },
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -456,6 +541,7 @@ const changePassword = async (req, res) => {
 module.exports = {
   signup,
   login,
+  checkUsername,
   changePassword,
   googleAuth,
   verifyEmail,

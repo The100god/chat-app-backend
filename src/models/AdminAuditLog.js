@@ -31,6 +31,14 @@ const AdminAuditLogSchema = new mongoose.Schema({
     default: Date.now,
     index: true,
   },
+  expiresAt: {
+    type: Date,
+    required: true,
+    default: () => new Date(Date.now() + 15 * 24 * 60 * 60 * 1000),
+    index: { expires: 0 },
+  },
 });
+
+AdminAuditLogSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 module.exports = mongoose.model("AdminAuditLog", AdminAuditLogSchema);

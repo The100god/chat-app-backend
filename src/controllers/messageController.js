@@ -45,7 +45,7 @@ exports.sendMessages = async (req, res) => {
     // Populate sender data
     const fullMessage = await Message.findById(savedMessage._id).populate(
       "sender",
-      "_id username profilePic"
+      "_id username name profilePic"
     );
 
     // Determine target receiver ID safely

@@ -19,6 +19,7 @@ router.get("/me", protect, getUserProfile);
 
 // Update logged-in user profile
 router.put("/updateProfile", protect, updateUserProfile);
+router.patch("/me", protect, updateUserProfile);
 
 // Change password route can be added here
 router.put("/changePassword", protect, changePasswordLimiter, changePassword)

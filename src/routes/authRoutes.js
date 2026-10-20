@@ -1,8 +1,9 @@
 const express = require("express");
-const {login, signup, googleAuth, verifyEmail, resendVerification, refreshTokenHandler} = require("../controllers/authController");
+const {login, signup, checkUsername, googleAuth, verifyEmail, resendVerification, refreshTokenHandler} = require("../controllers/authController");
 
 const router = express.Router()
 
+router.get("/check-username", checkUsername);
 router.post("/login", login)
 router.post("/signup", signup)
 router.get("/verify-email/:token", verifyEmail);

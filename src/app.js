@@ -14,6 +14,7 @@ const groupRoutes = require("./routes/groupRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const { getPublicConfig } = require("./controllers/adminController");
 const { initializeSocket } = require("./utils/socketManager");
+const activityLogger = require("./middleware/activityLogger");
 const cookieParser = require("cookie-parser");
 const helmet = require("helmet");
 const mongoSanitize = require("express-mongo-sanitize");
@@ -24,8 +25,13 @@ const app = express();
 
 app.use(cookieParser());
 
-// Security Middleware
-app.use(helmet());
+// Security Middleware with cross-origin access allowed for Admin & Mobile clients
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    crossOriginOpenerPolicy: { policy: "unsafe-none" },
+  })
+);
 app.use(mongoSanitize());
 app.disable("x-powered-by");
 
@@ -41,30 +47,47 @@ app.use((err, req, res, next) => {
   }
   next(err);
 });
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps, Expo Go, curl, Postman)
-      if (!origin) return callback(null, true);
 
-      // Allow matching CLIENT_URL if defined
-      if (process.env.CLIENT_URL && origin === process.env.CLIENT_URL) {
-        return callback(null, true);
-      }
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps, Expo Go, curl, Postman)
+    if (!origin) return callback(null, true);
 
-      // Allow any localhost, 10.x.x.x, 192.168.x.x IP addresses, or Expo origins
-      if (
-        /^http:\/\/(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$/.test(origin) ||
-        origin.startsWith('exp://')
-      ) {
-        return callback(null, true);
-      }
+    // Allow matching CLIENT_URL if defined
+    if (process.env.CLIENT_URL && origin === process.env.CLIENT_URL) {
+      return callback(null, true);
+    }
 
-      callback(null, true);
-    },
-    credentials: true,
-  })
-);
+    // Allow any localhost, 127.0.0.1, 10.x.x.x, 192.168.x.x, 172.x.x.x IP addresses on any port, or Expo origins
+    if (
+      /^http:\/\/(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$/.test(origin) ||
+      origin.startsWith('exp://') ||
+      origin.startsWith('http://localhost:') ||
+      origin.startsWith('http://127.0.0.1:')
+    ) {
+      return callback(null, true);
+    }
+
+    callback(null, true);
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Request-Id",
+    "x-request-id",
+    "x-client-platform",
+    "client-platform",
+    "x-app-version",
+    "app-version",
+    "x-installation-id",
+  ],
+  exposedHeaders: ["X-Request-Id"],
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 // app.use(
 //   cors({
 //     origin: (origin, callback) => {
@@ -110,7 +133,10 @@ initializeSocket(io);
 app.use((req, res, next) => {
   req.io = io;
   next();
-})
+});
+
+// Attach User API Activity Logger (Monitoring & 15-day TTL log system)
+app.use(activityLogger);
 
 // Rate limiting configuration
 const authLimiter = rateLimit({
@@ -186,7 +212,20 @@ app.get("/api/health", (req, res) => {
 
 mongoose
   .connect(process.env.MONGO_URI)
-  .then(() => console.log("MongoDb Connected"))
+  .then(async () => {
+    console.log("MongoDb Connected");
+    try {
+      const UserApiActivity = require("./models/UserApiActivity");
+      const AdminAuditLog = require("./models/AdminAuditLog");
+      await Promise.all([
+        UserApiActivity.collection.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+        AdminAuditLog.collection.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+      ]);
+      console.log("⏱️ 15-Day TTL Indexes verified for UserApiActivity and AdminAuditLog");
+    } catch (idxErr) {
+      console.warn("Notice: TTL index verification note:", idxErr.message);
+    }
+  })
   .catch((error) => console.log("MongoDb Connection Error: ", error));
 
 const PORT = process.env.PORT || 5000;

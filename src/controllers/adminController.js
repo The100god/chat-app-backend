@@ -28,24 +28,43 @@ const generateAdminToken = (admin) => {
   );
 };
 
-// Seed default Super Admin if none exists
+// Helper to parse multiple admin emails from env
+const getAdminEmails = () => {
+  const envVal = process.env.ADMIN_EMAIL || process.env.ADMIN_EMAILS || "";
+  return envVal
+    .split(/[,\s;]+/)
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+};
+
+// Seed/sync default Super Admins based on ADMIN_EMAIL env list
 const seedDefaultAdminIfNeeded = async () => {
   try {
-    const adminEmail = (process.env.ADMIN_EMAIL || "admin@chugli.app").toLowerCase().trim();
-    const adminPassword = process.env.ADMIN_PASSWORD || "Admin@Password123!";
+    const adminEmails = getAdminEmails();
+    if (adminEmails.length === 0) return;
 
-    const adminCount = await Admin.countDocuments();
-    if (adminCount === 0) {
-      const defaultAdmin = new Admin({
-        username: "superadmin",
-        email: adminEmail,
-        password: adminPassword,
-        role: "super_admin",
-        permissions: ["all"],
-        status: "active",
-      });
-      await defaultAdmin.save();
-      console.log(`🛡️ Default Super Admin initialized: ${adminEmail} / ${adminPassword}`);
+    for (const email of adminEmails) {
+      const user = await User.findOne({ email });
+      const admin = await Admin.findOne({ email });
+
+      if (user && !admin) {
+        // Direct insert to retain existing user password hash
+        await Admin.collection.insertOne({
+          username: user.username,
+          email: user.email.toLowerCase().trim(),
+          password: user.password,
+          role: "super_admin",
+          permissions: ["all"],
+          status: "active",
+          failedLoginAttempts: 0,
+          createdAt: new Date(),
+        });
+        console.log(`🛡️ Super Admin initialized from User account: ${email}`);
+      } else if (admin && admin.role !== "super_admin") {
+        admin.role = "super_admin";
+        admin.status = "active";
+        await admin.save();
+      }
     }
   } catch (err) {
     console.error("Error seeding default admin:", err.message);
@@ -79,31 +98,102 @@ exports.adminLogin = async (req, res) => {
       return res.status(400).json({ success: false, message: "Please provide username/email and password" });
     }
 
-    const admin = await Admin.findOne({
+    const cleanIdentifier = identifier.toLowerCase().trim();
+    const adminEmails = getAdminEmails();
+
+    // 1. Look for matching account in User or Admin collection
+    const user = await User.findOne({
       $or: [
-        { email: identifier.toLowerCase().trim() },
-        { username: identifier.trim() },
+        { email: cleanIdentifier },
+        { username: { $regex: new RegExp(`^${identifier.trim().replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')}$`, "i") } },
       ],
     });
 
-    if (!admin) {
-      return res.status(401).json({ success: false, message: "Invalid admin credentials" });
+    let admin = await Admin.findOne({
+      $or: [
+        { email: cleanIdentifier },
+        { username: { $regex: new RegExp(`^${identifier.trim().replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')}$`, "i") } },
+      ],
+    });
+
+    const targetEmail = (user?.email || admin?.email || cleanIdentifier).toLowerCase().trim();
+
+    // 2. Authorization check:
+    // Email must be in ADMIN_EMAIL list, OR already configured as an active admin/super_admin in DB
+    const isEnvAdmin = adminEmails.length > 0 ? adminEmails.includes(targetEmail) : false;
+    const isDbAdmin = admin && ["super_admin", "admin"].includes(admin.role);
+
+    if (!isEnvAdmin && !isDbAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied: This email is not authorized as an administrator.",
+      });
     }
 
-    if (admin.status !== "active") {
+    if (admin && admin.status !== "active") {
       return res.status(403).json({ success: false, message: `Account is ${admin.status}` });
     }
 
-    const isMatch = await admin.matchPassword(password);
+    // 3. Password Verification (check against user account, fallback to admin account)
+    let isMatch = false;
+    if (user) {
+      isMatch = await user.matchPassword(password);
+    }
+    if (!isMatch && admin) {
+      isMatch = await admin.matchPassword(password);
+    }
+
     if (!isMatch) {
-      admin.failedLoginAttempts = (admin.failedLoginAttempts || 0) + 1;
-      await admin.save();
+      if (admin) {
+        admin.failedLoginAttempts = (admin.failedLoginAttempts || 0) + 1;
+        await admin.save();
+      }
       return res.status(401).json({ success: false, message: "Invalid admin credentials" });
     }
 
-    admin.failedLoginAttempts = 0;
-    admin.lastLogin = new Date();
-    await admin.save();
+    // 4. Ensure an Admin document exists and is up to date
+    if (!admin) {
+      const username = user?.username || identifier.trim();
+      const userHashedPassword = user?.password;
+
+      if (userHashedPassword) {
+        await Admin.collection.insertOne({
+          username,
+          email: targetEmail,
+          password: userHashedPassword,
+          role: "super_admin",
+          permissions: ["all"],
+          status: "active",
+          failedLoginAttempts: 0,
+          createdAt: new Date(),
+        });
+        admin = await Admin.findOne({ email: targetEmail });
+      } else {
+        admin = new Admin({
+          username,
+          email: targetEmail,
+          password,
+          role: "super_admin",
+          permissions: ["all"],
+          status: "active",
+        });
+        await admin.save();
+      }
+    } else {
+      if (user && user.password && user.password !== admin.password) {
+        await Admin.collection.updateOne(
+          { _id: admin._id },
+          { $set: { password: user.password } }
+        );
+      }
+      admin.failedLoginAttempts = 0;
+      admin.lastLogin = new Date();
+      admin.status = "active";
+      if (isEnvAdmin && admin.role !== "super_admin") {
+        admin.role = "super_admin";
+      }
+      await admin.save();
+    }
 
     const token = generateAdminToken(admin);
 
@@ -120,7 +210,7 @@ exports.adminLogin = async (req, res) => {
       adminEmail: admin.email,
       action: "ADMIN_LOGIN",
       category: "auth",
-      details: { timestamp: new Date() },
+      details: { timestamp: new Date(), method: "credential" },
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
     });
@@ -435,6 +525,7 @@ exports.getUsers = async (req, res) => {
     const query = {};
     if (search) {
       query.$or = [
+        { name: { $regex: search, $options: "i" } },
         { username: { $regex: search, $options: "i" } },
         { email: { $regex: search, $options: "i" } },
       ];
@@ -688,5 +779,323 @@ exports.deleteAdmin = async (req, res) => {
   } catch (error) {
     console.error("Delete Admin Error:", error);
     return res.status(500).json({ success: false, message: "Failed to delete admin" });
+  }
+};
+
+// ==========================================
+// 8. User Moderation Actions (Spec v2)
+// ==========================================
+exports.getUserById = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select("-password");
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+    let activityCount = 0;
+    try {
+      const UserApiActivity = require("../models/UserApiActivity");
+      activityCount = await UserApiActivity.countDocuments({ user: user._id });
+    } catch {}
+
+    return res.json({
+      success: true,
+      user: {
+        ...user.toObject(),
+        activityCount,
+        friendCount: user.friends ? user.friends.length : 0,
+      },
+    });
+  } catch (error) {
+    console.error("Get User By ID Error:", error);
+    return res.status(500).json({ success: false, message: "Failed to fetch user details" });
+  }
+};
+
+exports.updateUserStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isSuspended, suspendedReason, isVerified } = req.body;
+
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    const changes = {};
+    if (typeof isSuspended === "boolean") {
+      user.isSuspended = isSuspended;
+      if (suspendedReason !== undefined) {
+        user.suspendedReason = suspendedReason;
+      }
+      changes.isSuspended = isSuspended;
+      changes.suspendedReason = suspendedReason;
+    }
+
+    if (typeof isVerified === "boolean") {
+      user.isVerified = isVerified;
+      changes.isVerified = isVerified;
+    }
+
+    await user.save();
+
+    await AdminAuditLog.create({
+      adminId: req.admin ? req.admin._id : null,
+      adminEmail: req.admin ? req.admin.email : "admin",
+      action: isSuspended ? "USER_SUSPENDED" : isSuspended === false ? "USER_UNSUSPENDED" : "USER_STATUS_UPDATED",
+      category: "user_moderation",
+      details: {
+        targetUserId: user._id,
+        targetUsername: user.username,
+        targetEmail: user.email,
+        changes,
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+
+    return res.json({
+      success: true,
+      message: `User '${user.username}' status updated successfully`,
+      user: {
+        _id: user._id,
+        username: user.username,
+        email: user.email,
+        isSuspended: user.isSuspended,
+        suspendedReason: user.suspendedReason,
+        isVerified: user.isVerified,
+      },
+    });
+  } catch (error) {
+    console.error("Update User Status Error:", error);
+    return res.status(500).json({ success: false, message: "Failed to update user status" });
+  }
+};
+
+exports.updateUserProfileAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { username, name, about } = req.body;
+
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    if (username && username.toLowerCase().trim() !== user.username.toLowerCase().trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Username is permanent and cannot be modified by any user or administrator.",
+      });
+    }
+
+    const changes = {};
+    if (name !== undefined) {
+      const trimmedName = name.trim();
+      if (!trimmedName) {
+        return res.status(400).json({ success: false, message: "Display name cannot be empty." });
+      }
+      if (trimmedName.length > 50) {
+        return res.status(400).json({ success: false, message: "Display name cannot exceed 50 characters." });
+      }
+      user.name = trimmedName;
+      changes.name = trimmedName;
+    }
+
+    if (about !== undefined) {
+      user.about = about;
+      changes.about = about;
+    }
+
+    await user.save();
+
+    await AdminAuditLog.create({
+      adminId: req.admin ? req.admin._id : null,
+      adminEmail: req.admin ? req.admin.email : "admin",
+      action: "USER_PROFILE_UPDATED",
+      category: "user_moderation",
+      details: {
+        targetUserId: user._id,
+        targetUsername: user.username,
+        targetEmail: user.email,
+        changes,
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+
+    return res.json({
+      success: true,
+      message: `User '${user.username}' profile updated successfully`,
+      user: {
+        _id: user._id,
+        username: user.username,
+        name: user.name,
+        email: user.email,
+        about: user.about,
+      },
+    });
+  } catch (error) {
+    console.error("Update User Profile Admin Error:", error);
+    return res.status(500).json({ success: false, message: "Failed to update user profile" });
+  }
+};
+
+exports.resetUserPassword = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { newPassword } = req.body;
+
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ success: false, message: "Password must be at least 6 characters long" });
+    }
+
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    user.password = newPassword;
+    await user.save(); // pre-save will bcrypt hash it
+
+    await AdminAuditLog.create({
+      adminId: req.admin ? req.admin._id : null,
+      adminEmail: req.admin ? req.admin.email : "admin",
+      action: "USER_PASSWORD_RESET",
+      category: "user_moderation",
+      details: {
+        targetUserId: user._id,
+        targetUsername: user.username,
+        targetEmail: user.email,
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+
+    return res.json({
+      success: true,
+      message: `Password for user '${user.username}' has been successfully reset.`,
+    });
+  } catch (error) {
+    console.error("Reset User Password Error:", error);
+    return res.status(500).json({ success: false, message: "Failed to reset user password" });
+  }
+};
+
+exports.deleteUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    await User.findByIdAndDelete(id);
+
+    await AdminAuditLog.create({
+      adminId: req.admin ? req.admin._id : null,
+      adminEmail: req.admin ? req.admin.email : "admin",
+      action: "USER_ACCOUNT_DELETED",
+      category: "user_moderation",
+      details: {
+        deletedUserId: id,
+        deletedUsername: user.username,
+        deletedEmail: user.email,
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+
+    return res.json({
+      success: true,
+      message: `User account '${user.username}' permanently deleted.`,
+    });
+  } catch (error) {
+    console.error("Delete User Error:", error);
+    return res.status(500).json({ success: false, message: "Failed to delete user account" });
+  }
+};
+
+exports.updateAdminRole = async (req, res) => {
+  try {
+    if (req.admin.role !== "super_admin") {
+      return res.status(403).json({ success: false, message: "Forbidden: Super Admin only" });
+    }
+    const { id } = req.params;
+    const { role } = req.body;
+    if (!role || !["super_admin", "admin", "moderator"].includes(role)) {
+      return res.status(400).json({ success: false, message: "Invalid role specified" });
+    }
+
+    const targetAdmin = await Admin.findById(id);
+    if (!targetAdmin) {
+      return res.status(404).json({ success: false, message: "Admin account not found" });
+    }
+
+    const oldRole = targetAdmin.role;
+    targetAdmin.role = role;
+    await targetAdmin.save();
+
+    await AdminAuditLog.create({
+      adminId: req.admin._id,
+      adminEmail: req.admin.email,
+      action: "UPDATE_ADMIN_ROLE",
+      category: "admin_management",
+      details: { adminId: id, adminEmail: targetAdmin.email, oldRole, newRole: role },
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+
+    return res.json({
+      success: true,
+      message: `Role for '${targetAdmin.username}' updated to ${role}.`,
+      admin: {
+        id: targetAdmin._id,
+        username: targetAdmin.username,
+        email: targetAdmin.email,
+        role: targetAdmin.role,
+      },
+    });
+  } catch (error) {
+    console.error("Update Admin Role Error:", error);
+    return res.status(500).json({ success: false, message: "Failed to update admin role" });
+  }
+};
+
+exports.resetAdminPassword = async (req, res) => {
+  try {
+    if (req.admin.role !== "super_admin") {
+      return res.status(403).json({ success: false, message: "Forbidden: Super Admin only" });
+    }
+    const { id } = req.params;
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ success: false, message: "New password must be at least 6 characters" });
+    }
+
+    const targetAdmin = await Admin.findById(id);
+    if (!targetAdmin) {
+      return res.status(404).json({ success: false, message: "Admin account not found" });
+    }
+
+    targetAdmin.password = newPassword;
+    await targetAdmin.save();
+
+    await AdminAuditLog.create({
+      adminId: req.admin._id,
+      adminEmail: req.admin.email,
+      action: "RESET_ADMIN_PASSWORD",
+      category: "admin_management",
+      details: { adminId: id, adminEmail: targetAdmin.email },
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+
+    return res.json({
+      success: true,
+      message: `Password for admin '${targetAdmin.username}' successfully reset.`,
+    });
+  } catch (error) {
+    console.error("Reset Admin Password Error:", error);
+    return res.status(500).json({ success: false, message: "Failed to reset admin password" });
   }
 };

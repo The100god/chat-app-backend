@@ -11,6 +11,7 @@ const { SendGroupMessageToDb } = require("../controllers/groupController");
 const Group = require("../models/Group");
 const GroupMessage = require("../models/GroupMessage");
 const { sendPushNotification } = require("./webPushHelper");
+const { recordSocketActivity } = require("./activityLoggerService");
 const {
   getSocketUserId,
   validateFriendship,
@@ -109,6 +110,13 @@ const initializeSocket = (io) => {
       io.emit("onlineUsers", Array.from(onlineUsers));
       io.emit("userOnline", hIdStr);
       io.emit("userOnline", { userId: hIdStr });
+
+      recordSocketActivity({
+        socket,
+        action: "socket.connected",
+        outcome: "success",
+        metadata: { userId: hIdStr },
+      }).catch(() => {});
     }
 
     socket.on("join", (userId) => {
@@ -122,6 +130,12 @@ const initializeSocket = (io) => {
       }
 
       socket.userId = uIdStr;
+      recordSocketActivity({
+        socket,
+        action: "socket.join",
+        outcome: "success",
+        metadata: { userId: uIdStr },
+      }).catch(() => {});
       users.set(uIdStr, socket.id);
       onlineUsers.add(uIdStr);
 
@@ -202,7 +216,7 @@ const initializeSocket = (io) => {
 
         const receiver = await User.findById(userId).populate(
           "friends",
-          "username profilePic"
+          "username name profilePic"
         );
         if (!receiver) return;
 
@@ -220,7 +234,7 @@ const initializeSocket = (io) => {
           const chats = await Chat.find({
             members: uObjectId,
             isGroupChat: { $ne: true },
-          }).populate("members", "username profilePic");
+          }).populate("members", "username name profilePic");
 
           for (const chat of chats) {
             if (Array.isArray(chat.members)) {
@@ -258,6 +272,7 @@ const initializeSocket = (io) => {
             return {
               friendId: friend._id.toString(),
               username: friend.username,
+              name: friend.name,
               profilePic: friend.profilePic,
               unreadMessagesCount,
             };
@@ -299,7 +314,7 @@ const initializeSocket = (io) => {
           if (receiverSocket && status === "accepted") {
             const receiver = await User.findById(receiverId).populate(
               "friends",
-              "username profilePic"
+              "username name profilePic"
             );
             const friendDetails = await Promise.all(
               receiver.friends.map(async (friend) => {
@@ -317,6 +332,7 @@ const initializeSocket = (io) => {
                 return {
                   friendId: friend._id,
                   username: friend.username,
+                  name: friend.name,
                   profilePic: friend.profilePic,
                   unreadMessagesCount,
                 };
@@ -374,7 +390,7 @@ const initializeSocket = (io) => {
           { expiresAt: { $exists: false } },
           { expiresAt: { $gt: new Date() } },
         ],
-      }).populate("sender", "_id username profilePic");
+      }).populate("sender", "_id username name profilePic");
 
       const ackPayload = {
         chatId: chatId ? chatId.toString() : undefined,
@@ -583,7 +599,7 @@ const initializeSocket = (io) => {
       try {
         const user = await User.findById(userId).populate(
           "friendRequests",
-          "_id username profilePic email"
+          "_id username name profilePic email"
         );
         if (!user) {
           return socket.emit("friendRequestsList", []);
@@ -591,6 +607,7 @@ const initializeSocket = (io) => {
         const friendRequests = user.friendRequests.map((requester) => ({
           _id: requester._id,
           username: requester.username,
+          name: requester.name,
           profilePic: requester.profilePic,
         }));
 
@@ -832,8 +849,8 @@ const initializeSocket = (io) => {
           { expiresAt: { $gt: new Date() } },
         ],
       })
-        .populate("sender", "_id username profilePic groupProfilePic groupName")
-        .populate("seenBy", "_id username profilePic");
+        .populate("sender", "_id username name profilePic groupProfilePic groupName")
+        .populate("seenBy", "_id username name profilePic");
 
       io.to(groupId.toString()).emit("groupSeenUpdate", {
         groupId: groupId.toString(),
