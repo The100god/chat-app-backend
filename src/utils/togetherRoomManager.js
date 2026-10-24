@@ -2,6 +2,8 @@
 const crypto = require("crypto");
 const User = require("../models/User");
 const { cleanupRoomMedia } = require("./cloudinaryHelper");
+const gamificationService = require("../services/gamificationService");
+const PairGameProgress = require("../models/PairGameProgress");
 
 // ─── In-memory stores ───
 const rooms = new Map();     // roomId → TogetherRoom
@@ -597,6 +599,7 @@ function makeTicTacToeMove(roomId, userId, cellIndex) {
     updateSessionStats(room, null, null, true);
   } else {
     game.currentTurn = playerSymbol === "X" ? "O" : "X";
+    game.turnStartedAt = Date.now();
   }
 
   return { room: serializeRoom(room) };
@@ -725,6 +728,7 @@ function nextRPSRound(roomId, userId) {
   rps.playerChoices = {};
   rps.roundResult = null;
   rps.round += 1;
+  rps.roundStartedAt = Date.now();
   rps.status = "playing";
   return { room: serializeRoom(room) };
 }
@@ -736,6 +740,7 @@ function restartRPSGame(roomId, userId) {
   rps.playerChoices = {};
   rps.roundResult = null;
   rps.round = 1;
+  rps.roundStartedAt = Date.now();
   Array.from(room.participants).forEach((pid) => (rps.scores[pid] = 0));
   rps.status = "playing";
   return { room: serializeRoom(room) };
@@ -792,6 +797,7 @@ function makeConnect4Move(roomId, userId, colIndex) {
     updateSessionStats(room, null, null, true);
   } else {
     c4.currentTurn = symbol === "R" ? "Y" : "R";
+    c4.turnStartedAt = Date.now();
   }
 
   return { room: serializeRoom(room) };
@@ -1699,6 +1705,13 @@ function initCatchPartnerRoomState(room, hostId) {
     { id: "pu2", x: 400, y: 480, type: "speed" },
   ];
 
+  const courtyardLayout = room.state.levelConfig?.courtyardLayout;
+  const activeObstacles =
+    courtyardLayout?.obstacles && courtyardLayout.obstacles.length > 0
+      ? courtyardLayout.obstacles
+      : defaultObstacles;
+  const roundTimer = room.state.levelConfig?.timeSec || 30;
+
   room.state.catchPartner = {
     status: p2 ? "setup" : "waiting",
     players,
@@ -1708,12 +1721,14 @@ function initCatchPartnerRoomState(room, hostId) {
     },
     round: 1,
     maxRounds: 5,
-    timer: 30,
+    timer: roundTimer,
+    roundTimer: roundTimer,
     scores,
     winner: null,
     roundResult: null,
-    obstacles: defaultObstacles,
+    obstacles: activeObstacles,
     powerUps: defaultPowerUps,
+    courtyardLayout: courtyardLayout || null,
     comments: [],
   };
 }
@@ -1775,7 +1790,7 @@ function startCatchPartnerGame(roomId, userId, io) {
 
   const cp = room.state.catchPartner;
   cp.status = "playing";
-  cp.timer = 30;
+  cp.timer = cp.roundTimer || 30;
   cp.roundResult = null;
 
   // Reset player positions
@@ -1961,7 +1976,7 @@ function nextCatchPartnerRound(roomId, userId) {
 
     cp.status = "setup";
     cp.roundResult = null;
-    cp.timer = 30;
+    cp.timer = cp.roundTimer || 30;
   }
 
   return { room: serializeRoom(room) };
@@ -1980,7 +1995,150 @@ function restartCatchPartnerGame(roomId, userId) {
   return { room: serializeRoom(room) };
 }
 
+/**
+ * Inject level-specific time, grid, and courtyard layout (obstacles) into the active room
+ */
+async function applyGamificationLevelToRoom(room) {
+  if (!room || room.type !== "game" || !room.gameId) return;
+  const pList = Array.from(room.participants || []);
+  if (pList.length < 2) return;
+
+  const [p1, p2] = pList;
+  const pairId = gamificationService.getCanonicalPairId(p1, p2);
+  if (!pairId) return;
+
+  try {
+    const normGameId = gamificationService.normalizeGameId(room.gameId);
+    let progress = await PairGameProgress.findOne({ pairId, gameId: normGameId }).lean();
+    const currentLevel = progress?.currentLevel || 1;
+    const levelConfig = await gamificationService.getGameLevelConfig(normGameId, currentLevel);
+
+    const now = Date.now();
+    room.state.currentLevel = currentLevel;
+    room.state.levelConfig = levelConfig;
+
+    if (room.state.catchPartner) {
+      const cp = room.state.catchPartner;
+      if (levelConfig.courtyardLayout?.obstacles?.length > 0) {
+        cp.obstacles = levelConfig.courtyardLayout.obstacles;
+      }
+      cp.courtyardLayout = levelConfig.courtyardLayout;
+      cp.roundTimer = levelConfig.timeSec || 30;
+      cp.timer = levelConfig.timeSec || 30;
+      cp.catcherSpeed = levelConfig.courtyardLayout?.catcherSpeed || 150;
+      cp.runnerSpeed = levelConfig.courtyardLayout?.runnerSpeed || 160;
+    } else if (room.state.ticTacToe) {
+      room.state.ticTacToe.timeSec = levelConfig.timeSec || 30;
+      if (!room.state.ticTacToe.turnStartedAt) room.state.ticTacToe.turnStartedAt = now;
+    } else if (room.state.connect4) {
+      room.state.connect4.timeSec = levelConfig.timeSec || 30;
+      if (!room.state.connect4.turnStartedAt) room.state.connect4.turnStartedAt = now;
+    } else if (room.state.rps) {
+      room.state.rps.timeSec = levelConfig.timeSec || 15;
+      if (!room.state.rps.roundStartedAt) room.state.rps.roundStartedAt = now;
+      if (levelConfig.gridConfig?.bestOfRounds) {
+        room.state.rps.maxRounds = levelConfig.gridConfig.bestOfRounds;
+      }
+    } else if (room.state.memoryMatch) {
+      room.state.memoryMatch.timeSec = levelConfig.timeSec || 25;
+      if (!room.state.memoryMatch.turnStartedAt) room.state.memoryMatch.turnStartedAt = now;
+    } else if (room.state.quiz) {
+      room.state.quiz.timeSec = levelConfig.timeSec || 30;
+      if (!room.state.quiz.roundStartedAt) room.state.quiz.roundStartedAt = now;
+      if (levelConfig.gridConfig?.questionsCount) {
+        room.state.quiz.maxQuestions = levelConfig.gridConfig.questionsCount;
+      }
+    } else if (room.state.drawing) {
+      room.state.drawing.timeSec = levelConfig.timeSec || 45;
+      if (!room.state.drawing.roundStartedAt) room.state.drawing.roundStartedAt = now;
+    }
+  } catch (err) {
+    console.error("Error applying gamification level to room:", err);
+  }
+}
+
+/**
+ * Server-authoritatively finalizes match, calculates rewards, records point transactions,
+ * checks level up (1 to 20), evaluates unlocks, and emits together:gamification:result
+ */
+async function finalizeGameMatch(roomId, io) {
+  const room = rooms.get(roomId);
+  if (!room || room.type !== "game" || !room.gameId) return null;
+  const pList = Array.from(room.participants || []);
+  if (pList.length < 2) return null;
+
+  const gameKey =
+    room.state.ticTacToe ? "ticTacToe" :
+    room.state.connect4 ? "connect4" :
+    room.state.memoryMatch ? "memoryMatch" :
+    room.state.rps ? "rps" :
+    room.state.catchPartner ? "catchPartner" :
+    room.state.quiz ? "quiz" : null;
+
+  if (!gameKey) return null;
+  const game = room.state[gameKey];
+  if (!game || game.status !== "finished") return null;
+
+  // Prevent duplicate finalization of the same match
+  const currentMatchTag = `${room.roomId}_${game.matchId || Date.now()}`;
+  if (room.lastFinalizedMatchId === currentMatchTag) return null;
+  room.lastFinalizedMatchId = currentMatchTag;
+
+  let winnerId = null;
+  let isDraw = false;
+
+  if (gameKey === "ticTacToe") {
+    winnerId = game.winner ? (game.winner === "X" ? game.players.X : game.players.O) : null;
+    isDraw = !!game.isDraw;
+  } else if (gameKey === "connect4") {
+    winnerId = game.winner ? (game.winner === "R" ? game.players.R : game.players.Y) : null;
+    isDraw = !!game.isDraw;
+  } else if (gameKey === "memoryMatch") {
+    winnerId = game.winner || null;
+    isDraw = !!game.isDraw;
+  } else if (gameKey === "rps") {
+    winnerId = game.winner || null;
+    isDraw = !!game.isDraw;
+  } else if (gameKey === "catchPartner") {
+    winnerId = game.winner || null;
+    isDraw = !winnerId;
+  } else if (gameKey === "quiz") {
+    winnerId = game.winner || null;
+    isDraw = !winnerId;
+  }
+
+  // Update in-memory session stats for the room
+  const loserId = winnerId ? pList.find((p) => String(p) !== String(winnerId)) : null;
+  updateSessionStats(room, winnerId, loserId, isDraw, room.gameId);
+
+  const result = await gamificationService.processMatchCompletion({
+    roomId: room.roomId,
+    matchId: currentMatchTag,
+    gameId: room.gameId,
+    participants: pList,
+    winnerId,
+    isDraw,
+    durationSec: Math.round((Date.now() - (game.startedAt || room.createdAt)) / 1000),
+    movesCount: game.movesCount || 1,
+  });
+
+  if (result && !result.error) {
+    room.state.gamificationResult = result;
+    if (result.levelInfo?.currentLevel) {
+      room.state.currentLevel = result.levelInfo.currentLevel;
+    }
+    if (io) {
+      io.to(`together:${roomId}`).emit("together:gamification:result", result);
+      io.to(`together:${roomId}`).emit("together:state", serializeRoom(room));
+    }
+  }
+
+  return result;
+}
+
 module.exports = {
+  applyGamificationLevelToRoom,
+  finalizeGameMatch,
   getSocketUserId,
   validateFriendship,
   createRoom,

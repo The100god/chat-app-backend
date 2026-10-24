@@ -196,6 +196,8 @@ app.use("/api/message", messageRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/groups", groupRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/gamification", require("./routes/gamificationRoutes"));
+app.use("/api/admin/gamification", require("./routes/adminGamificationRoutes"));
 app.get("/api/config/public", getPublicConfig);
 
 // Health check endpoint
@@ -224,6 +226,13 @@ mongoose
       console.log("⏱️ 15-Day TTL Indexes verified for UserApiActivity and AdminAuditLog");
     } catch (idxErr) {
       console.warn("Notice: TTL index verification note:", idxErr.message);
+    }
+
+    try {
+      const { seedGamificationConfigs } = require("./utils/gamificationSeeder");
+      await seedGamificationConfigs();
+    } catch (seedErr) {
+      console.error("Notice: Gamification seeder note:", seedErr.message);
     }
   })
   .catch((error) => console.log("MongoDb Connection Error: ", error));

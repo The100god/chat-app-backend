@@ -13,6 +13,8 @@ const GroupMessage = require("../models/GroupMessage");
 const { sendPushNotification } = require("./webPushHelper");
 const { recordSocketActivity } = require("./activityLoggerService");
 const {
+  applyGamificationLevelToRoom,
+  finalizeGameMatch,
   getSocketUserId,
   validateFriendship,
   createRoom,
@@ -953,7 +955,7 @@ const initializeSocket = (io) => {
 
       // Validate room exists
       const existingRoom = getRoom(roomId);
-      if (!existingRoom) return socket.emit("together:error", { message: "Room not found" });
+      if (!existingRoom) return socket.emit("together:error", { message: "Room not found", code: "ROOM_EXPIRED" });
 
       // Validate friendship with host
       const isFriend = await validateFriendship(userId, existingRoom.hostId);
@@ -963,6 +965,8 @@ const initializeSocket = (io) => {
 
       const result = joinRoom(roomId, userId);
       if (result.error) return socket.emit("together:error", { message: result.error });
+
+      await applyGamificationLevelToRoom(result.room);
 
       const roomSocketId = `together:${roomId}`;
       socket.join(roomSocketId);
@@ -1043,6 +1047,8 @@ const initializeSocket = (io) => {
       const result = switchGame(roomId, userId, gameId);
       if (result.error) return socket.emit("together:error", { message: result.error });
 
+      await applyGamificationLevelToRoom(result.room);
+
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
     });
@@ -1071,6 +1077,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:tictactoe:restart", async ({ roomId }) => {
@@ -1079,6 +1086,8 @@ const initializeSocket = (io) => {
 
       const result = restartTicTacToeGame(roomId, userId);
       if (result.error) return socket.emit("together:error", { message: result.error });
+
+      await applyGamificationLevelToRoom(result.room);
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
@@ -1160,6 +1169,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:rps:nextRound", async ({ roomId }) => {
@@ -1171,6 +1181,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:rps:restart", async ({ roomId }) => {
@@ -1179,6 +1190,8 @@ const initializeSocket = (io) => {
 
       const result = restartRPSGame(roomId, userId);
       if (result.error) return socket.emit("together:error", { message: result.error });
+
+      await applyGamificationLevelToRoom(result.room);
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
@@ -1194,6 +1207,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:connect4:startGame", async ({ roomId }) => {
@@ -1225,6 +1239,8 @@ const initializeSocket = (io) => {
       const result = restartConnect4Game(roomId, userId);
       if (result.error) return socket.emit("together:error", { message: result.error });
 
+      await applyGamificationLevelToRoom(result.room);
+
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
     });
@@ -1239,6 +1255,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:memory:resetFlipped", async ({ roomId }) => {
@@ -1280,6 +1297,8 @@ const initializeSocket = (io) => {
 
       const result = restartMemoryGame(roomId, userId);
       if (result.error) return socket.emit("together:error", { message: result.error });
+
+      await applyGamificationLevelToRoom(result.room);
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
@@ -1395,6 +1414,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:quiz:restart", async ({ roomId }) => {
@@ -1403,6 +1423,8 @@ const initializeSocket = (io) => {
 
       const result = restartQuizGame(roomId, userId);
       if (result.error) return socket.emit("together:error", { message: result.error });
+
+      await applyGamificationLevelToRoom(result.room);
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
@@ -1440,6 +1462,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:catchpartner:nextRound", async ({ roomId }) => {
@@ -1451,6 +1474,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:catchpartner:restart", async ({ roomId }) => {
@@ -1459,6 +1483,8 @@ const initializeSocket = (io) => {
 
       const result = restartCatchPartnerGame(roomId, userId);
       if (result.error) return socket.emit("together:error", { message: result.error });
+
+      await applyGamificationLevelToRoom(result.room);
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
