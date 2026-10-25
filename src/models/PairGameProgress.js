@@ -59,6 +59,14 @@ const PairGameProgressSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: {}, // e.g. { "1": { plays: 3, wins: 2 }, "2": { ... } }
     },
+    userWins: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {}, // e.g. { "userIdA": 3, "userIdB": 2 }
+    },
+    ties: {
+      type: Number,
+      default: 0,
+    },
   },
   {
     timestamps: true,

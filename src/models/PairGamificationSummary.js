@@ -38,6 +38,14 @@ const PairGamificationSummarySchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    userWins: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {}, // e.g. { "userIdA": 12, "userIdB": 8 }
+    },
+    totalCombinedTies: {
+      type: Number,
+      default: 0,
+    },
     lastPlayedAt: {
       type: Date,
       default: null,

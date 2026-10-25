@@ -193,6 +193,35 @@ async function getPairGamificationState(userA, userB) {
   const progressMap = new Map();
   progressList.forEach((p) => progressMap.set(p.gameId, p));
 
+  // Check if we need to hydrate historical userWins from PointTransaction
+  const hasRecordedWins = progressList.some(
+    (p) => p.userWins && Object.keys(p.userWins).length > 0
+  );
+  if (!hasRecordedWins) {
+    try {
+      const winTx = await PointTransaction.aggregate([
+        { $match: { pairId, type: "win_bonus" } },
+        { $group: { _id: { gameId: "$gameId", userId: "$userId" }, count: { $sum: 1 } } },
+      ]);
+      if (winTx && winTx.length > 0) {
+        winTx.forEach((row) => {
+          const gId = row._id.gameId;
+          const uId = String(row._id.userId);
+          const prog = progressMap.get(gId);
+          if (prog) {
+            if (!prog.userWins) prog.userWins = {};
+            prog.userWins[uId] = row.count;
+          }
+        });
+      }
+    } catch (e) {
+      // non-blocking
+    }
+  }
+
+  const uA = String(userA);
+  const uB = String(userB);
+
   const games = configs.map((cfg) => {
     const prog = progressMap.get(cfg.gameId);
     const currentLevel = prog?.currentLevel || 1;
@@ -200,6 +229,12 @@ async function getPairGamificationState(userA, userB) {
       cfg.levelConfigs?.find((l) => l.level === currentLevel) ||
       cfg.levelConfigs?.[0] ||
       {};
+
+    const userWinsMap = prog?.userWins || {};
+    const myWins = Number(userWinsMap[uA] || 0);
+    const partnerWins = Number(userWinsMap[uB] || 0);
+    const ties = Number(prog?.ties || 0);
+    const totalPlays = prog?.combinedPlays || (myWins + partnerWins + ties);
 
     return {
       gameId: cfg.gameId,
@@ -216,7 +251,15 @@ async function getPairGamificationState(userA, userB) {
       maximumLevel: cfg.maximumLevel || 20,
       combinedPoints: prog?.combinedEligiblePoints || 0,
       combinedWins: prog?.combinedWins || 0,
-      combinedPlays: prog?.combinedPlays || 0,
+      combinedPlays: totalPlays,
+      pairStats: {
+        myWins,
+        partnerWins,
+        ties,
+        totalPlays,
+      },
+      userWins: userWinsMap,
+      ties,
       lastPlayedAt: prog?.lastPlayedAt || null,
       unlockRequirements: {
         pointsRequired: cfg.unlockRequirements?.pointsRequired || 0,
@@ -233,13 +276,30 @@ async function getPairGamificationState(userA, userB) {
     };
   });
 
+  const sumWinsMap = summary?.userWins || {};
+  let myTotalWins = Number(sumWinsMap[uA] || 0);
+  let partnerTotalWins = Number(sumWinsMap[uB] || 0);
+  let totalTies = Number(summary?.totalCombinedTies || 0);
+
+  // If summary userWins wasn't populated yet, aggregate from games
+  if (myTotalWins === 0 && partnerTotalWins === 0) {
+    games.forEach((g) => {
+      myTotalWins += g.pairStats.myWins;
+      partnerTotalWins += g.pairStats.partnerWins;
+      totalTies += g.pairStats.ties;
+    });
+  }
+
   return {
     pairId,
     memberUserIds,
     summary: {
       totalCombinedPoints: summary?.totalCombinedPoints || 0,
-      totalCombinedWins: summary?.totalCombinedWins || 0,
+      totalCombinedWins: summary?.totalCombinedWins || (myTotalWins + partnerTotalWins),
       totalCombinedPlays: summary?.totalCombinedPlays || 0,
+      myTotalWins,
+      partnerTotalWins,
+      totalTies,
       unlockedGamesCount: summary?.unlockedGamesCount || 1,
       currentStreak: summary?.currentStreak || 0,
       highestStreak: summary?.highestStreak || 0,
@@ -422,7 +482,17 @@ async function processMatchCompletion({
 
     progress.combinedEligiblePoints += totalMatchPoints;
     progress.combinedPlays += 1;
-    if (winnerId) progress.combinedWins += 1;
+    if (winnerId && !isDraw) {
+      progress.combinedWins += 1;
+      const wIdStr = String(winnerId);
+      const uWins = progress.userWins || {};
+      uWins[wIdStr] = (uWins[wIdStr] || 0) + 1;
+      progress.userWins = uWins;
+      progress.markModified("userWins");
+    } else if (isDraw) {
+      progress.ties = (progress.ties || 0) + 1;
+    }
+
     progress.currentLevel = newLevel;
     if (newLevel > progress.highestLevelAchieved) {
       progress.highestLevelAchieved = newLevel;
@@ -432,16 +502,25 @@ async function processMatchCompletion({
     await progress.save();
 
     // 5. Update PairGamificationSummary
+    const summaryUpdate = {
+      $inc: {
+        totalCombinedPoints: totalMatchPoints,
+        totalCombinedPlays: 1,
+      },
+      $set: { lastPlayedAt: new Date() },
+    };
+
+    if (winnerId && !isDraw) {
+      summaryUpdate.$inc.totalCombinedWins = 1;
+      const wIdStr = String(winnerId);
+      summaryUpdate.$inc[`userWins.${wIdStr}`] = 1;
+    } else if (isDraw) {
+      summaryUpdate.$inc.totalCombinedTies = 1;
+    }
+
     const summary = await PairGamificationSummary.findOneAndUpdate(
       { pairId },
-      {
-        $inc: {
-          totalCombinedPoints: totalMatchPoints,
-          totalCombinedPlays: 1,
-          totalCombinedWins: winnerId ? 1 : 0,
-        },
-        $set: { lastPlayedAt: new Date() },
-      },
+      summaryUpdate,
       { upsert: true, new: true }
     );
 
