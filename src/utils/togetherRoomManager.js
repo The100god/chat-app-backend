@@ -2,6 +2,8 @@
 const crypto = require("crypto");
 const User = require("../models/User");
 const { cleanupRoomMedia } = require("./cloudinaryHelper");
+const gamificationService = require("../services/gamificationService");
+const PairGameProgress = require("../models/PairGameProgress");
 
 // ─── In-memory stores ───
 const rooms = new Map();     // roomId → TogetherRoom
@@ -81,11 +83,10 @@ function createRoom(hostId, type, gameId = null) {
     hostId,
     participants: new Set([hostId]),
     state: {},
-    sessionStats: {
-      [hostId]: { wins: 0, losses: 0, ties: 0, total: 0 },
-    },
+    sessionStats: {},
     createdAt: Date.now(),
   };
+  ensureUserStats(room, hostId);
 
   if (type === "game" && gameId) {
     initGameRoomState(room, gameId, hostId);
@@ -130,6 +131,9 @@ function initGameRoomState(room, gameId, hostId) {
       playerChoices: {},
       scores,
       round: 1,
+      roundResult: null,
+      winner: null,
+      isDraw: false,
       status: p2 ? "playing" : "waiting",
       comments: [],
     };
@@ -245,10 +249,7 @@ function joinRoom(roomId, userId) {
   room.participants.add(userId);
   userRooms.set(userId, roomId);
 
-  if (!room.sessionStats) room.sessionStats = {};
-  if (!room.sessionStats[userId]) {
-    room.sessionStats[userId] = { wins: 0, losses: 0, ties: 0, total: 0 };
-  }
+  ensureUserStats(room, userId);
 
   if (room.type === "game") {
     if (room.state.ticTacToe) {
@@ -264,7 +265,15 @@ function joinRoom(roomId, userId) {
     if (room.state.rps) {
       const g = room.state.rps;
       if (g.scores[userId] === undefined) g.scores[userId] = 0;
-      if (room.participants.size >= 2) g.status = "playing";
+      if (room.participants.size >= 2) {
+        if (g.status === "waiting") {
+          g.status = "playing";
+          g.playerChoices = {};
+          g.roundResult = null;
+          g.winner = null;
+          g.isDraw = false;
+        }
+      }
     }
     if (room.state.connect4) {
       const g = room.state.connect4;
@@ -351,12 +360,22 @@ function leaveRoom(roomId, userId) {
     return { room: null, closed: true };
   }
 
-  // Reset game comments when a player leaves
+  // Reset game comments and state when a player leaves
   if (room.type === "game" && room.state.ticTacToe) {
     room.state.ticTacToe.comments = [];
     if (userId === room.state.ticTacToe.players.O) {
       room.state.ticTacToe.players.O = null;
       room.state.ticTacToe.status = "waiting";
+    }
+  }
+  if (room.type === "game" && room.state.rps) {
+    const g = room.state.rps;
+    if (room.participants.size < 2) {
+      g.status = "waiting";
+      g.playerChoices = {};
+      g.roundResult = null;
+      g.winner = null;
+      g.isDraw = false;
     }
   }
 
@@ -597,9 +616,24 @@ function makeTicTacToeMove(roomId, userId, cellIndex) {
     updateSessionStats(room, null, null, true);
   } else {
     game.currentTurn = playerSymbol === "X" ? "O" : "X";
+    game.turnStartedAt = Date.now();
   }
 
   return { room: serializeRoom(room) };
+}
+
+function ensureUserStats(room, userId) {
+  if (!room.sessionStats) room.sessionStats = {};
+  if (!room.sessionStats[userId]) {
+    room.sessionStats[userId] = { wins: 0, losses: 0, ties: 0, total: 0 };
+  }
+  const allGames = ["tictactoe", "rps", "connect4", "memory", "quiz", "catchpartner"];
+  for (const gId of allGames) {
+    const key = `${gId}_${userId}`;
+    if (!room.sessionStats[key]) {
+      room.sessionStats[key] = { wins: 0, losses: 0, ties: 0, total: 0 };
+    }
+  }
 }
 
 /**
@@ -610,17 +644,7 @@ function updateSessionStats(room, winnerId, loserId, isDraw = false, gameId = nu
   const activeGame = gameId || room.gameId;
 
   room.participants.forEach((pId) => {
-    // Overall stats per user
-    if (!room.sessionStats[pId]) {
-      room.sessionStats[pId] = { wins: 0, losses: 0, ties: 0, total: 0 };
-    }
-    // Per-game stats per user
-    if (activeGame) {
-      const gUserKey = `${activeGame}_${pId}`;
-      if (!room.sessionStats[gUserKey]) {
-        room.sessionStats[gUserKey] = { wins: 0, losses: 0, ties: 0, total: 0 };
-      }
-    }
+    ensureUserStats(room, pId);
   });
 
   // Per-game overall stats
@@ -629,17 +653,16 @@ function updateSessionStats(room, winnerId, loserId, isDraw = false, gameId = nu
   }
 
   if (isDraw) {
-    room.participants.forEach((pId) => {
-      if (room.sessionStats[pId]) {
-        room.sessionStats[pId].ties += 1;
-        room.sessionStats[pId].total += 1;
-      }
+    const involved = [winnerId, loserId].filter(Boolean);
+    const targets = involved.length > 0 ? involved : Array.from(room.participants);
+    targets.forEach((pId) => {
+      ensureUserStats(room, pId);
+      room.sessionStats[pId].ties += 1;
+      room.sessionStats[pId].total += 1;
       if (activeGame) {
         const gUserKey = `${activeGame}_${pId}`;
-        if (room.sessionStats[gUserKey]) {
-          room.sessionStats[gUserKey].ties += 1;
-          room.sessionStats[gUserKey].total += 1;
-        }
+        room.sessionStats[gUserKey].ties += 1;
+        room.sessionStats[gUserKey].total += 1;
       }
     });
     if (activeGame && room.sessionStats[activeGame]) {
@@ -648,29 +671,23 @@ function updateSessionStats(room, winnerId, loserId, isDraw = false, gameId = nu
     }
   } else {
     if (winnerId) {
-      if (room.sessionStats[winnerId]) {
-        room.sessionStats[winnerId].wins += 1;
-        room.sessionStats[winnerId].total += 1;
-      }
+      ensureUserStats(room, winnerId);
+      room.sessionStats[winnerId].wins += 1;
+      room.sessionStats[winnerId].total += 1;
       if (activeGame) {
         const winKey = `${activeGame}_${winnerId}`;
-        if (room.sessionStats[winKey]) {
-          room.sessionStats[winKey].wins += 1;
-          room.sessionStats[winKey].total += 1;
-        }
+        room.sessionStats[winKey].wins += 1;
+        room.sessionStats[winKey].total += 1;
       }
     }
     if (loserId) {
-      if (room.sessionStats[loserId]) {
-        room.sessionStats[loserId].losses += 1;
-        room.sessionStats[loserId].total += 1;
-      }
+      ensureUserStats(room, loserId);
+      room.sessionStats[loserId].losses += 1;
+      room.sessionStats[loserId].total += 1;
       if (activeGame) {
         const loseKey = `${activeGame}_${loserId}`;
-        if (room.sessionStats[loseKey]) {
-          room.sessionStats[loseKey].losses += 1;
-          room.sessionStats[loseKey].total += 1;
-        }
+        room.sessionStats[loseKey].losses += 1;
+        room.sessionStats[loseKey].total += 1;
       }
     }
     if (activeGame && room.sessionStats[activeGame]) {
@@ -688,31 +705,65 @@ function submitRPSChoice(roomId, userId, choice) {
   if (!["rock", "paper", "scissors"].includes(choice)) return { error: "Invalid choice" };
 
   const rps = room.state.rps;
+
+  // If a round already ended with a result, reject new moves until next round / restart
+  if (rps.status === "round_ended" && rps.roundResult) {
+    return { room: serializeRoom(room) };
+  }
+
+  if (!rps.playerChoices || typeof rps.playerChoices !== "object") {
+    rps.playerChoices = {};
+  }
+
+  // Record this player's choice
   rps.playerChoices[userId] = choice;
 
-  const pIds = Array.from(room.participants);
-  if (pIds.length >= 2 && pIds.every((id) => rps.playerChoices[id])) {
+  const pIds = Array.from(room.participants).filter((id) => id !== null && id !== undefined);
+  if (pIds.length >= 2) {
     const [p1, p2] = pIds;
     const c1 = rps.playerChoices[p1];
     const c2 = rps.playerChoices[p2];
 
-    if (c1 === c2) {
-      rps.roundResult = { winnerId: null, isDraw: true, reason: `Both picked ${c1}` };
-      updateSessionStats(room, null, null, true);
-    } else if (
-      (c1 === "rock" && c2 === "scissors") ||
-      (c1 === "scissors" && c2 === "paper") ||
-      (c1 === "paper" && c2 === "rock")
-    ) {
-      rps.scores[p1] = (rps.scores[p1] || 0) + 1;
-      rps.roundResult = { winnerId: p1, isDraw: false, reason: `${c1} beats ${c2}` };
-      updateSessionStats(room, p1, p2, false);
+    const validMoves = ["rock", "paper", "scissors"];
+
+    // Both players MUST have submitted a valid choice for this round to finish
+    if (validMoves.includes(c1) && validMoves.includes(c2)) {
+      if (c1 === c2) {
+        rps.roundResult = { winnerId: null, isDraw: true, reason: `Both picked ${c1}` };
+        rps.winner = null;
+        rps.isDraw = true;
+        updateSessionStats(room, null, null, true, "rps");
+      } else if (
+        (c1 === "rock" && c2 === "scissors") ||
+        (c1 === "scissors" && c2 === "paper") ||
+        (c1 === "paper" && c2 === "rock")
+      ) {
+        rps.scores[p1] = (rps.scores[p1] || 0) + 1;
+        rps.roundResult = { winnerId: p1, isDraw: false, reason: `${c1} beats ${c2}` };
+        rps.winner = p1;
+        rps.isDraw = false;
+        updateSessionStats(room, p1, p2, false, "rps");
+      } else if (
+        (c2 === "rock" && c1 === "scissors") ||
+        (c2 === "scissors" && c1 === "paper") ||
+        (c2 === "paper" && c1 === "rock")
+      ) {
+        rps.scores[p2] = (rps.scores[p2] || 0) + 1;
+        rps.roundResult = { winnerId: p2, isDraw: false, reason: `${c2} beats ${c1}` };
+        rps.winner = p2;
+        rps.isDraw = false;
+        updateSessionStats(room, p2, p1, false, "rps");
+      }
+
+      rps.status = "round_ended";
+      rps.roundEndedAt = Date.now();
     } else {
-      rps.scores[p2] = (rps.scores[p2] || 0) + 1;
-      rps.roundResult = { winnerId: p2, isDraw: false, reason: `${c2} beats ${c1}` };
-      updateSessionStats(room, p2, p1, false);
+      // Only one player has chosen so far: remain in playing state
+      rps.status = "playing";
     }
-    rps.status = "round_ended";
+  } else {
+    // Less than 2 participants: waiting for partner
+    rps.status = "waiting";
   }
 
   return { room: serializeRoom(room) };
@@ -724,8 +775,11 @@ function nextRPSRound(roomId, userId) {
   const rps = room.state.rps;
   rps.playerChoices = {};
   rps.roundResult = null;
+  rps.winner = null;
+  rps.isDraw = false;
   rps.round += 1;
-  rps.status = "playing";
+  rps.roundStartedAt = Date.now();
+  rps.status = room.participants.size >= 2 ? "playing" : "waiting";
   return { room: serializeRoom(room) };
 }
 
@@ -735,9 +789,12 @@ function restartRPSGame(roomId, userId) {
   const rps = room.state.rps;
   rps.playerChoices = {};
   rps.roundResult = null;
+  rps.winner = null;
+  rps.isDraw = false;
   rps.round = 1;
+  rps.roundStartedAt = Date.now();
   Array.from(room.participants).forEach((pid) => (rps.scores[pid] = 0));
-  rps.status = "playing";
+  rps.status = room.participants.size >= 2 ? "playing" : "waiting";
   return { room: serializeRoom(room) };
 }
 
@@ -792,6 +849,7 @@ function makeConnect4Move(roomId, userId, colIndex) {
     updateSessionStats(room, null, null, true);
   } else {
     c4.currentTurn = symbol === "R" ? "Y" : "R";
+    c4.turnStartedAt = Date.now();
   }
 
   return { room: serializeRoom(room) };
@@ -1699,6 +1757,13 @@ function initCatchPartnerRoomState(room, hostId) {
     { id: "pu2", x: 400, y: 480, type: "speed" },
   ];
 
+  const courtyardLayout = room.state.levelConfig?.courtyardLayout;
+  const activeObstacles =
+    courtyardLayout?.obstacles && courtyardLayout.obstacles.length > 0
+      ? courtyardLayout.obstacles
+      : defaultObstacles;
+  const roundTimer = room.state.levelConfig?.timeSec || 30;
+
   room.state.catchPartner = {
     status: p2 ? "setup" : "waiting",
     players,
@@ -1708,12 +1773,14 @@ function initCatchPartnerRoomState(room, hostId) {
     },
     round: 1,
     maxRounds: 5,
-    timer: 30,
+    timer: roundTimer,
+    roundTimer: roundTimer,
     scores,
     winner: null,
     roundResult: null,
-    obstacles: defaultObstacles,
+    obstacles: activeObstacles,
     powerUps: defaultPowerUps,
+    courtyardLayout: courtyardLayout || null,
     comments: [],
   };
 }
@@ -1775,7 +1842,7 @@ function startCatchPartnerGame(roomId, userId, io) {
 
   const cp = room.state.catchPartner;
   cp.status = "playing";
-  cp.timer = 30;
+  cp.timer = cp.roundTimer || 30;
   cp.roundResult = null;
 
   // Reset player positions
@@ -1961,7 +2028,7 @@ function nextCatchPartnerRound(roomId, userId) {
 
     cp.status = "setup";
     cp.roundResult = null;
-    cp.timer = 30;
+    cp.timer = cp.roundTimer || 30;
   }
 
   return { room: serializeRoom(room) };
@@ -1980,7 +2047,150 @@ function restartCatchPartnerGame(roomId, userId) {
   return { room: serializeRoom(room) };
 }
 
+/**
+ * Inject level-specific time, grid, and courtyard layout (obstacles) into the active room
+ */
+async function applyGamificationLevelToRoom(room) {
+  if (!room || room.type !== "game" || !room.gameId) return;
+  const pList = Array.from(room.participants || []);
+  if (pList.length < 2) return;
+
+  const [p1, p2] = pList;
+  const pairId = gamificationService.getCanonicalPairId(p1, p2);
+  if (!pairId) return;
+
+  try {
+    const normGameId = gamificationService.normalizeGameId(room.gameId);
+    let progress = await PairGameProgress.findOne({ pairId, gameId: normGameId }).lean();
+    const currentLevel = progress?.currentLevel || 1;
+    const levelConfig = await gamificationService.getGameLevelConfig(normGameId, currentLevel);
+
+    const now = Date.now();
+    room.state.currentLevel = currentLevel;
+    room.state.levelConfig = levelConfig;
+
+    if (room.state.catchPartner) {
+      const cp = room.state.catchPartner;
+      if (levelConfig.courtyardLayout?.obstacles?.length > 0) {
+        cp.obstacles = levelConfig.courtyardLayout.obstacles;
+      }
+      cp.courtyardLayout = levelConfig.courtyardLayout;
+      cp.roundTimer = levelConfig.timeSec || 30;
+      cp.timer = levelConfig.timeSec || 30;
+      cp.catcherSpeed = levelConfig.courtyardLayout?.catcherSpeed || 150;
+      cp.runnerSpeed = levelConfig.courtyardLayout?.runnerSpeed || 160;
+    } else if (room.state.ticTacToe) {
+      room.state.ticTacToe.timeSec = levelConfig.timeSec || 30;
+      if (!room.state.ticTacToe.turnStartedAt) room.state.ticTacToe.turnStartedAt = now;
+    } else if (room.state.connect4) {
+      room.state.connect4.timeSec = levelConfig.timeSec || 30;
+      if (!room.state.connect4.turnStartedAt) room.state.connect4.turnStartedAt = now;
+    } else if (room.state.rps) {
+      room.state.rps.timeSec = levelConfig.timeSec || 15;
+      if (!room.state.rps.roundStartedAt) room.state.rps.roundStartedAt = now;
+      if (levelConfig.gridConfig?.bestOfRounds) {
+        room.state.rps.maxRounds = levelConfig.gridConfig.bestOfRounds;
+      }
+    } else if (room.state.memoryMatch) {
+      room.state.memoryMatch.timeSec = levelConfig.timeSec || 25;
+      if (!room.state.memoryMatch.turnStartedAt) room.state.memoryMatch.turnStartedAt = now;
+    } else if (room.state.quiz) {
+      room.state.quiz.timeSec = levelConfig.timeSec || 30;
+      if (!room.state.quiz.roundStartedAt) room.state.quiz.roundStartedAt = now;
+      if (levelConfig.gridConfig?.questionsCount) {
+        room.state.quiz.maxQuestions = levelConfig.gridConfig.questionsCount;
+      }
+    } else if (room.state.drawing) {
+      room.state.drawing.timeSec = levelConfig.timeSec || 45;
+      if (!room.state.drawing.roundStartedAt) room.state.drawing.roundStartedAt = now;
+    }
+  } catch (err) {
+    console.error("Error applying gamification level to room:", err);
+  }
+}
+
+/**
+ * Server-authoritatively finalizes match, calculates rewards, records point transactions,
+ * checks level up (1 to 20), evaluates unlocks, and emits together:gamification:result
+ */
+async function finalizeGameMatch(roomId, io) {
+  const room = rooms.get(roomId);
+  if (!room || room.type !== "game" || !room.gameId) return null;
+  const pList = Array.from(room.participants || []);
+  if (pList.length < 2) return null;
+
+  const gameKey =
+    room.state.ticTacToe ? "ticTacToe" :
+    room.state.connect4 ? "connect4" :
+    room.state.memoryMatch ? "memoryMatch" :
+    room.state.rps ? "rps" :
+    room.state.catchPartner ? "catchPartner" :
+    room.state.quiz ? "quiz" : null;
+
+  if (!gameKey) return null;
+  const game = room.state[gameKey];
+  const isFinished =
+    game?.status === "finished" ||
+    (gameKey === "rps" && game?.status === "round_ended" && game?.roundResult);
+  if (!isFinished) return null;
+
+  // Prevent duplicate finalization of the same match
+  const currentMatchTag = `${room.roomId}_${gameKey}_${gameKey === "rps" ? (game.round || 1) : (game.matchId || Date.now())}`;
+  if (room.lastFinalizedMatchId === currentMatchTag) return null;
+  room.lastFinalizedMatchId = currentMatchTag;
+
+  let winnerId = null;
+  let isDraw = false;
+
+  if (gameKey === "ticTacToe") {
+    winnerId = game.winner ? (game.winner === "X" ? game.players.X : game.players.O) : null;
+    isDraw = !!game.isDraw;
+  } else if (gameKey === "connect4") {
+    winnerId = game.winner ? (game.winner === "R" ? game.players.R : game.players.Y) : null;
+    isDraw = !!game.isDraw;
+  } else if (gameKey === "memoryMatch") {
+    winnerId = game.winner || null;
+    isDraw = !!game.isDraw;
+  } else if (gameKey === "rps") {
+    winnerId = game.roundResult?.winnerId || game.winner || null;
+    isDraw = !!game.roundResult?.isDraw;
+  } else if (gameKey === "catchPartner") {
+    winnerId = game.winner || null;
+    isDraw = !winnerId;
+  } else if (gameKey === "quiz") {
+    winnerId = game.winner || null;
+    isDraw = !winnerId;
+  }
+
+
+  const result = await gamificationService.processMatchCompletion({
+    roomId: room.roomId,
+    matchId: currentMatchTag,
+    gameId: room.gameId,
+    participants: pList,
+    winnerId,
+    isDraw,
+    durationSec: Math.round((Date.now() - (game.startedAt || room.createdAt)) / 1000),
+    movesCount: game.movesCount || 1,
+  });
+
+  if (result && !result.error) {
+    room.state.gamificationResult = result;
+    if (result.levelInfo?.currentLevel) {
+      room.state.currentLevel = result.levelInfo.currentLevel;
+    }
+    if (io) {
+      io.to(`together:${roomId}`).emit("together:gamification:result", result);
+      io.to(`together:${roomId}`).emit("together:state", serializeRoom(room));
+    }
+  }
+
+  return result;
+}
+
 module.exports = {
+  applyGamificationLevelToRoom,
+  finalizeGameMatch,
   getSocketUserId,
   validateFriendship,
   createRoom,

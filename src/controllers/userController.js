@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 const User = require("../models/User");
 const cloudinary = require("../utils/cloudinary");
 
-// Search users by username (returns all users if query is empty)
+// Search users by username or display name (returns all users if query is empty)
 const searchUsersByUsername = async (req, res) => {
   const { username, userId } = req.query;
 
@@ -23,10 +23,14 @@ const searchUsersByUsername = async (req, res) => {
     };
 
     if (username && username.trim() !== "") {
-      query.username = { $regex: username.trim(), $options: "i" };
+      const escaped = username.trim().replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+      query.$or = [
+        { username: { $regex: escaped, $options: "i" } },
+        { name: { $regex: escaped, $options: "i" } },
+      ];
     }
 
-    const users = await User.find(query).select("_id username profilePic");
+    const users = await User.find(query).select("_id username name profilePic about");
     res.status(200).json(users);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -47,13 +51,31 @@ const getUserProfile = async (req, res) => {
 // ✅ Update logged-in user profile
 const updateUserProfile = async (req, res) => {
   try {
-    const { username, about, profilePic } = req.body;
+    const { username, name, about, profilePic } = req.body;
     const user = await User.findById(req.user._id);
 
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    if (username) user.username = username;
-    if (about) user.about = about;
+    // Reject attempt to modify permanent username
+    if (username && username.toLowerCase().trim() !== user.username.toLowerCase().trim()) {
+      return res.status(400).json({
+        message: "Username is permanent and cannot be modified.",
+      });
+    }
+
+    // Allow updating display name
+    if (name !== undefined) {
+      const trimmedName = name.trim();
+      if (!trimmedName) {
+        return res.status(400).json({ message: "Display name cannot be empty." });
+      }
+      if (trimmedName.length > 50) {
+        return res.status(400).json({ message: "Display name cannot exceed 50 characters." });
+      }
+      user.name = trimmedName;
+    }
+
+    if (about !== undefined) user.about = about;
 
     // 📸 If the profilePic is a base64 image, upload it to Cloudinary
     if (profilePic && profilePic.startsWith("data:")) {
@@ -75,6 +97,7 @@ const updateUserProfile = async (req, res) => {
       user: {
         _id: user._id,
         username: user.username,
+        name: user.name,
         email: user.email,
         about: user.about,
         profilePic: user.profilePic,

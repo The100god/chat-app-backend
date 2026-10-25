@@ -11,7 +11,10 @@ const { SendGroupMessageToDb } = require("../controllers/groupController");
 const Group = require("../models/Group");
 const GroupMessage = require("../models/GroupMessage");
 const { sendPushNotification } = require("./webPushHelper");
+const { recordSocketActivity } = require("./activityLoggerService");
 const {
+  applyGamificationLevelToRoom,
+  finalizeGameMatch,
   getSocketUserId,
   validateFriendship,
   createRoom,
@@ -109,6 +112,13 @@ const initializeSocket = (io) => {
       io.emit("onlineUsers", Array.from(onlineUsers));
       io.emit("userOnline", hIdStr);
       io.emit("userOnline", { userId: hIdStr });
+
+      recordSocketActivity({
+        socket,
+        action: "socket.connected",
+        outcome: "success",
+        metadata: { userId: hIdStr },
+      }).catch(() => {});
     }
 
     socket.on("join", (userId) => {
@@ -122,6 +132,12 @@ const initializeSocket = (io) => {
       }
 
       socket.userId = uIdStr;
+      recordSocketActivity({
+        socket,
+        action: "socket.join",
+        outcome: "success",
+        metadata: { userId: uIdStr },
+      }).catch(() => {});
       users.set(uIdStr, socket.id);
       onlineUsers.add(uIdStr);
 
@@ -202,7 +218,7 @@ const initializeSocket = (io) => {
 
         const receiver = await User.findById(userId).populate(
           "friends",
-          "username profilePic"
+          "username name profilePic"
         );
         if (!receiver) return;
 
@@ -220,7 +236,7 @@ const initializeSocket = (io) => {
           const chats = await Chat.find({
             members: uObjectId,
             isGroupChat: { $ne: true },
-          }).populate("members", "username profilePic");
+          }).populate("members", "username name profilePic");
 
           for (const chat of chats) {
             if (Array.isArray(chat.members)) {
@@ -258,6 +274,7 @@ const initializeSocket = (io) => {
             return {
               friendId: friend._id.toString(),
               username: friend.username,
+              name: friend.name,
               profilePic: friend.profilePic,
               unreadMessagesCount,
             };
@@ -299,7 +316,7 @@ const initializeSocket = (io) => {
           if (receiverSocket && status === "accepted") {
             const receiver = await User.findById(receiverId).populate(
               "friends",
-              "username profilePic"
+              "username name profilePic"
             );
             const friendDetails = await Promise.all(
               receiver.friends.map(async (friend) => {
@@ -317,6 +334,7 @@ const initializeSocket = (io) => {
                 return {
                   friendId: friend._id,
                   username: friend.username,
+                  name: friend.name,
                   profilePic: friend.profilePic,
                   unreadMessagesCount,
                 };
@@ -374,7 +392,7 @@ const initializeSocket = (io) => {
           { expiresAt: { $exists: false } },
           { expiresAt: { $gt: new Date() } },
         ],
-      }).populate("sender", "_id username profilePic");
+      }).populate("sender", "_id username name profilePic");
 
       const ackPayload = {
         chatId: chatId ? chatId.toString() : undefined,
@@ -583,7 +601,7 @@ const initializeSocket = (io) => {
       try {
         const user = await User.findById(userId).populate(
           "friendRequests",
-          "_id username profilePic email"
+          "_id username name profilePic email"
         );
         if (!user) {
           return socket.emit("friendRequestsList", []);
@@ -591,6 +609,7 @@ const initializeSocket = (io) => {
         const friendRequests = user.friendRequests.map((requester) => ({
           _id: requester._id,
           username: requester.username,
+          name: requester.name,
           profilePic: requester.profilePic,
         }));
 
@@ -832,8 +851,8 @@ const initializeSocket = (io) => {
           { expiresAt: { $gt: new Date() } },
         ],
       })
-        .populate("sender", "_id username profilePic groupProfilePic groupName")
-        .populate("seenBy", "_id username profilePic");
+        .populate("sender", "_id username name profilePic groupProfilePic groupName")
+        .populate("seenBy", "_id username name profilePic");
 
       io.to(groupId.toString()).emit("groupSeenUpdate", {
         groupId: groupId.toString(),
@@ -936,7 +955,7 @@ const initializeSocket = (io) => {
 
       // Validate room exists
       const existingRoom = getRoom(roomId);
-      if (!existingRoom) return socket.emit("together:error", { message: "Room not found" });
+      if (!existingRoom) return socket.emit("together:error", { message: "Room not found", code: "ROOM_EXPIRED" });
 
       // Validate friendship with host
       const isFriend = await validateFriendship(userId, existingRoom.hostId);
@@ -946,6 +965,8 @@ const initializeSocket = (io) => {
 
       const result = joinRoom(roomId, userId);
       if (result.error) return socket.emit("together:error", { message: result.error });
+
+      await applyGamificationLevelToRoom(result.room);
 
       const roomSocketId = `together:${roomId}`;
       socket.join(roomSocketId);
@@ -1026,6 +1047,8 @@ const initializeSocket = (io) => {
       const result = switchGame(roomId, userId, gameId);
       if (result.error) return socket.emit("together:error", { message: result.error });
 
+      await applyGamificationLevelToRoom(result.room);
+
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
     });
@@ -1054,6 +1077,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:tictactoe:restart", async ({ roomId }) => {
@@ -1062,6 +1086,8 @@ const initializeSocket = (io) => {
 
       const result = restartTicTacToeGame(roomId, userId);
       if (result.error) return socket.emit("together:error", { message: result.error });
+
+      await applyGamificationLevelToRoom(result.room);
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
@@ -1143,6 +1169,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:rps:nextRound", async ({ roomId }) => {
@@ -1154,6 +1181,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:rps:restart", async ({ roomId }) => {
@@ -1162,6 +1190,8 @@ const initializeSocket = (io) => {
 
       const result = restartRPSGame(roomId, userId);
       if (result.error) return socket.emit("together:error", { message: result.error });
+
+      await applyGamificationLevelToRoom(result.room);
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
@@ -1177,6 +1207,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:connect4:startGame", async ({ roomId }) => {
@@ -1208,6 +1239,8 @@ const initializeSocket = (io) => {
       const result = restartConnect4Game(roomId, userId);
       if (result.error) return socket.emit("together:error", { message: result.error });
 
+      await applyGamificationLevelToRoom(result.room);
+
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
     });
@@ -1222,6 +1255,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:memory:resetFlipped", async ({ roomId }) => {
@@ -1263,6 +1297,8 @@ const initializeSocket = (io) => {
 
       const result = restartMemoryGame(roomId, userId);
       if (result.error) return socket.emit("together:error", { message: result.error });
+
+      await applyGamificationLevelToRoom(result.room);
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
@@ -1378,6 +1414,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:quiz:restart", async ({ roomId }) => {
@@ -1386,6 +1423,8 @@ const initializeSocket = (io) => {
 
       const result = restartQuizGame(roomId, userId);
       if (result.error) return socket.emit("together:error", { message: result.error });
+
+      await applyGamificationLevelToRoom(result.room);
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
@@ -1423,6 +1462,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:catchpartner:nextRound", async ({ roomId }) => {
@@ -1434,6 +1474,7 @@ const initializeSocket = (io) => {
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
+      await finalizeGameMatch(roomId, io);
     });
 
     socket.on("together:catchpartner:restart", async ({ roomId }) => {
@@ -1442,6 +1483,8 @@ const initializeSocket = (io) => {
 
       const result = restartCatchPartnerGame(roomId, userId);
       if (result.error) return socket.emit("together:error", { message: result.error });
+
+      await applyGamificationLevelToRoom(result.room);
 
       const roomSocketId = `together:${roomId}`;
       io.to(roomSocketId).emit("together:state", result.room);
